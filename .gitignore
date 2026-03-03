@@ -1,0 +1,43 @@
+# ── macOS ──────────────────────────────────────
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+Icon?
+
+# ── Swift / SPM / Xcode ───────────────────────
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserdatad
+*.xcodeproj
+*.xcworkspace
+Package.resolved
+*.o
+*.dSYM/
+*.ipa
+*.hmap
+*.modulemap
+
+# ── AI Agents & Editors ───────────────────────
+.claude/
+.omc/
+.cursor/
+.aider*
+.copilot/
+.codeium/
+.windsurf/
+.codex/
+.continue/
+
+# ── General ────────────────────────────────────
+*.log
+node_modules/
+out/
+dist/
+
+# ── Project-specific ──────────────────────────
+Resources/xray-core
