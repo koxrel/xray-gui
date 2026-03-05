@@ -13,6 +13,9 @@ struct SettingsView: View {
     @State private var enableMux: Bool = false
     @State private var muxConcurrencyText: String = "8"
     @State private var dnsText: String = ""
+    @State private var dnsMode: DNSMode = .plain
+    @State private var dohServer: String = "https://1.1.1.1/dns-query"
+    @State private var dohPreset: DoHPreset = .cloudflare
     @State private var bypassText: String = ""
     @State private var directText: String = ""
     @State private var blockedText: String = ""
@@ -128,15 +131,53 @@ struct SettingsView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("DNS Servers")
-                TextEditor(text: $dnsText)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(height: 50)
-                    .onChange(of: dnsText) { markChanged() }
-                Text("One per line")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("DNS")
+                Picker("DNS Mode", selection: $dnsMode) {
+                    ForEach(DNSMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: dnsMode) { markChanged() }
+
+                if dnsMode == .plain {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("DNS Servers")
+                            .font(.caption)
+                        TextEditor(text: $dnsText)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(height: 50)
+                            .onChange(of: dnsText) { markChanged() }
+                        Text("One per line")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("Provider", selection: $dohPreset) {
+                            ForEach(DoHPreset.allCases) { preset in
+                                Text(preset.displayName).tag(preset)
+                            }
+                        }
+                        .onChange(of: dohPreset) {
+                            if dohPreset != .custom {
+                                dohServer = dohPreset.url
+                            }
+                            markChanged()
+                        }
+
+                        if dohPreset == .custom {
+                            TextField("DoH URL", text: $dohServer)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.caption, design: .monospaced))
+                                .onChange(of: dohServer) { markChanged() }
+                            Text("e.g. https://dns.example.com/dns-query")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
         }
     }
@@ -183,6 +224,9 @@ struct SettingsView: View {
         enableMux = s.enableMux
         muxConcurrencyText = String(s.muxConcurrency)
         dnsText = s.dnsServers.joined(separator: "\n")
+        dnsMode = s.dnsMode
+        dohServer = s.dohServer
+        dohPreset = DoHPreset.from(url: s.dohServer)
         bypassText = s.bypassDomains.joined(separator: "\n")
         directText = s.directDomains.joined(separator: "\n")
         blockedText = s.blockedDomains.joined(separator: "\n")
@@ -236,6 +280,18 @@ struct SettingsView: View {
             return
         }
 
+        // Validate DoH URL
+        if dnsMode == .doh {
+            let trimmed = dohServer.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let url = URL(string: trimmed),
+                  url.scheme?.lowercased() == "https",
+                  url.host != nil else {
+                validationError = "DoH server must be a valid HTTPS URL (e.g. https://1.1.1.1/dns-query)"
+                return
+            }
+        }
+
         await appState.updateSettings { s in
             s.httpPort = httpPort
             s.socksPort = socksPort
@@ -245,6 +301,8 @@ struct SettingsView: View {
             s.enableMux = enableMux
             s.muxConcurrency = muxConcurrency
             s.dnsServers = parseLines(dnsText)
+            s.dnsMode = dnsMode
+            s.dohServer = dohServer
             s.bypassDomains = parseLines(bypassText)
             s.directDomains = parseLines(directText)
             s.blockedDomains = parseLines(blockedText)

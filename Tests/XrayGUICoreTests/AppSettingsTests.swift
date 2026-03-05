@@ -19,6 +19,8 @@ struct AppSettingsTests {
         #expect(settings.enableMux == false)
         #expect(settings.muxConcurrency == 8)
         #expect(settings.dnsServers == ["1.1.1.1", "8.8.8.8"])
+        #expect(settings.dnsMode == .plain)
+        #expect(settings.dohServer == "https://1.1.1.1/dns-query")
         #expect(settings.bypassDomains == ["localhost", "127.0.0.1", "*.local"])
         #expect(settings.blockedDomains == ["geosite:category-ads-all"])
         #expect(settings.theme == .system)
@@ -190,6 +192,22 @@ struct AppSettingsTests {
         #expect(a.needsProxyRestart(comparedTo: b) == true)
     }
 
+    @Test("needsProxyRestart returns true when dnsMode changes")
+    func restartOnDnsModeChange() {
+        let a = AppSettings.default
+        var b = a
+        b.dnsMode = .doh
+        #expect(a.needsProxyRestart(comparedTo: b) == true)
+    }
+
+    @Test("needsProxyRestart returns true when dohServer changes")
+    func restartOnDohServerChange() {
+        let a = AppSettings.default
+        var b = a
+        b.dohServer = "https://8.8.8.8/dns-query"
+        #expect(a.needsProxyRestart(comparedTo: b) == true)
+    }
+
     @Test("needsProxyRestart returns false when only pacUrl changes")
     func noRestartOnPacUrlChange() {
         let a = AppSettings.default
@@ -228,5 +246,53 @@ struct AppSettingsTests {
     @Test("AppTheme has 3 cases")
     func appThemeCases() {
         #expect(AppTheme.allCases.count == 3)
+    }
+
+    // MARK: - DNS Mode & DoH
+
+    @Test("DNSMode has 2 cases")
+    func dnsModeCases() {
+        #expect(DNSMode.allCases.count == 2)
+    }
+
+    @Test("DNSMode displayName values")
+    func dnsModeDisplayNames() {
+        #expect(DNSMode.plain.displayName == "Plain DNS")
+        #expect(DNSMode.doh.displayName == "DNS over HTTPS")
+    }
+
+    @Test("Decoding JSON without dnsMode/dohServer uses defaults")
+    func decodingMissingDnsFields() throws {
+        let json = Data("""
+        {"httpPort": 1087, "socksPort": 1080}
+        """.utf8)
+        let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+        #expect(settings.dnsMode == .plain)
+        #expect(settings.dohServer == "https://1.1.1.1/dns-query")
+    }
+
+    @Test("Codable round-trip preserves dnsMode and dohServer")
+    func codableRoundTripDns() throws {
+        var original = AppSettings.default
+        original.dnsMode = .doh
+        original.dohServer = "https://9.9.9.9/dns-query"
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
+        #expect(decoded.dnsMode == .doh)
+        #expect(decoded.dohServer == "https://9.9.9.9/dns-query")
+    }
+
+    @Test("DoHPreset.from reverse-maps known URLs correctly")
+    func dohPresetFromUrl() {
+        #expect(DoHPreset.from(url: "https://1.1.1.1/dns-query") == .cloudflare)
+        #expect(DoHPreset.from(url: "https://8.8.8.8/dns-query") == .google)
+        #expect(DoHPreset.from(url: "https://9.9.9.9/dns-query") == .quad9)
+        #expect(DoHPreset.from(url: "https://custom.example.com/dns-query") == .custom)
+    }
+
+    @Test("DoHPreset.from trims whitespace before matching")
+    func dohPresetFromUrlWhitespace() {
+        #expect(DoHPreset.from(url: "  https://1.1.1.1/dns-query  ") == .cloudflare)
+        #expect(DoHPreset.from(url: "https://8.8.8.8/dns-query\n") == .google)
     }
 }

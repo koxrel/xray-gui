@@ -33,6 +33,8 @@ struct ConfigGeneratorTests {
         logLevel: LogLevel = .warning,
         enableMux: Bool = false,
         dnsServers: [String] = ["1.1.1.1"],
+        dnsMode: DNSMode = .plain,
+        dohServer: String = "https://1.1.1.1/dns-query",
         bypassDomains: [String] = ["localhost"],
         directDomains: [String] = [],
         blockedDomains: [String] = []
@@ -43,6 +45,8 @@ struct ConfigGeneratorTests {
             allowLan: allowLan,
             logLevel: logLevel,
             dnsServers: dnsServers,
+            dnsMode: dnsMode,
+            dohServer: dohServer,
             enableMux: enableMux,
             bypassDomains: bypassDomains,
             directDomains: directDomains,
@@ -215,6 +219,61 @@ struct ConfigGeneratorTests {
         let dns = config["dns"] as? [String: Any]
         let servers = dns?["servers"] as? [String]
         #expect(servers == ["8.8.8.8", "1.1.1.1"])
+    }
+
+    @Test("DoH mode generates Xray DoH config with queryStrategy")
+    func dohDnsConfig() {
+        let config = ConfigGenerator.generateXrayConfig(
+            server: makeServer(),
+            settings: makeSettings(dnsMode: .doh, dohServer: "https://1.1.1.1/dns-query")
+        )
+        let dns = config["dns"] as? [String: Any]
+        #expect(dns != nil)
+        #expect(dns?["queryStrategy"] as? String == "UseIP")
+        let servers = dns?["servers"] as? [String]
+        #expect(servers?.count == 2)
+        #expect(servers?.first == "https+local://1.1.1.1/dns-query")
+        #expect(servers?.last == "localhost")
+    }
+
+    @Test("DoH mode with empty URL produces no dns block")
+    func dohEmptyUrl() {
+        let config = ConfigGenerator.generateXrayConfig(
+            server: makeServer(),
+            settings: makeSettings(dnsMode: .doh, dohServer: "")
+        )
+        let dns = config["dns"] as? [String: Any]
+        #expect(dns == nil)
+    }
+
+    @Test("xrayDoHAddress converts https:// to https+local://")
+    func xrayDoHAddressHttps() {
+        let result = ConfigGenerator.xrayDoHAddress("https://8.8.8.8/dns-query")
+        #expect(result == "https+local://8.8.8.8/dns-query")
+    }
+
+    @Test("xrayDoHAddress passes through already-prefixed URLs")
+    func xrayDoHAddressIdempotent() {
+        let result = ConfigGenerator.xrayDoHAddress("https+local://1.1.1.1/dns-query")
+        #expect(result == "https+local://1.1.1.1/dns-query")
+    }
+
+    @Test("xrayDoHAddress returns empty for empty string")
+    func xrayDoHAddressEmpty() {
+        let result = ConfigGenerator.xrayDoHAddress("")
+        #expect(result == "")
+    }
+
+    @Test("xrayDoHAddress returns empty for http:// URLs")
+    func xrayDoHAddressHttp() {
+        let result = ConfigGenerator.xrayDoHAddress("http://1.1.1.1/dns-query")
+        #expect(result == "")
+    }
+
+    @Test("xrayDoHAddress handles bare hostname")
+    func xrayDoHAddressBareHost() {
+        let result = ConfigGenerator.xrayDoHAddress("1.1.1.1/dns-query")
+        #expect(result == "https+local://1.1.1.1/dns-query")
     }
 
     // MARK: - Stream Settings

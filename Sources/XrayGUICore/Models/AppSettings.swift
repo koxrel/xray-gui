@@ -9,6 +9,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var autoStart: Bool
     public var logLevel: LogLevel
     public var dnsServers: [String]
+    public var dnsMode: DNSMode
+    public var dohServer: String
     public var enableMux: Bool
     public var muxConcurrency: Int
     public var bypassDomains: [String]
@@ -21,6 +23,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         httpPort != other.httpPort || socksPort != other.socksPort || allowLan != other.allowLan
             || logLevel != other.logLevel || enableMux != other.enableMux
             || muxConcurrency != other.muxConcurrency || dnsServers != other.dnsServers
+            || dnsMode != other.dnsMode || dohServer != other.dohServer
             || bypassDomains != other.bypassDomains || directDomains != other.directDomains
             || blockedDomains != other.blockedDomains
     }
@@ -34,6 +37,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         autoStart: Bool = false,
         logLevel: LogLevel = .warning,
         dnsServers: [String] = ["1.1.1.1", "8.8.8.8"],
+        dnsMode: DNSMode = .plain,
+        dohServer: String = "https://1.1.1.1/dns-query",
         enableMux: Bool = false,
         muxConcurrency: Int = 8,
         bypassDomains: [String] = ["localhost", "127.0.0.1", "*.local"],
@@ -50,6 +55,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.autoStart = autoStart
         self.logLevel = logLevel
         self.dnsServers = dnsServers
+        self.dnsMode = dnsMode
+        self.dohServer = dohServer
         self.enableMux = enableMux
         self.muxConcurrency = muxConcurrency
         self.bypassDomains = bypassDomains
@@ -70,6 +77,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         autoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? defaults.autoStart
         logLevel = (try? container.decodeIfPresent(LogLevel.self, forKey: .logLevel)) ?? defaults.logLevel
         dnsServers = try container.decodeIfPresent([String].self, forKey: .dnsServers) ?? defaults.dnsServers
+        dnsMode = (try? container.decodeIfPresent(DNSMode.self, forKey: .dnsMode)) ?? defaults.dnsMode
+        dohServer = try container.decodeIfPresent(String.self, forKey: .dohServer) ?? defaults.dohServer
         enableMux = try container.decodeIfPresent(Bool.self, forKey: .enableMux) ?? defaults.enableMux
         muxConcurrency = try container.decodeIfPresent(Int.self, forKey: .muxConcurrency) ?? defaults.muxConcurrency
         bypassDomains = try container.decodeIfPresent([String].self, forKey: .bypassDomains) ?? defaults.bypassDomains
@@ -88,6 +97,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         autoStart: false,
         logLevel: .warning,
         dnsServers: ["1.1.1.1", "8.8.8.8"],
+        dnsMode: .plain,
+        dohServer: "https://1.1.1.1/dns-query",
         enableMux: false,
         muxConcurrency: 8,
         bypassDomains: ["localhost", "127.0.0.1", "*.local"],
@@ -124,4 +135,51 @@ public enum AppTheme: String, Codable, CaseIterable, Sendable {
     case system
     case light
     case dark
+}
+
+public enum DNSMode: String, Codable, CaseIterable, Sendable {
+    case plain
+    case doh
+
+    public var displayName: String {
+        switch self {
+        case .plain: return "Plain DNS"
+        case .doh: return "DNS over HTTPS"
+        }
+    }
+}
+
+public enum DoHPreset: String, CaseIterable, Identifiable, Sendable {
+    case cloudflare
+    case google
+    case quad9
+    case custom
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .cloudflare: return "Cloudflare (1.1.1.1)"
+        case .google: return "Google (8.8.8.8)"
+        case .quad9: return "Quad9 (9.9.9.9)"
+        case .custom: return "Custom"
+        }
+    }
+
+    public var url: String {
+        switch self {
+        case .cloudflare: return "https://1.1.1.1/dns-query"
+        case .google: return "https://8.8.8.8/dns-query"
+        case .quad9: return "https://9.9.9.9/dns-query"
+        case .custom: return ""
+        }
+    }
+
+    public static func from(url: String) -> DoHPreset {
+        let normalized = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        for preset in allCases where preset != .custom {
+            if preset.url == normalized { return preset }
+        }
+        return .custom
+    }
 }

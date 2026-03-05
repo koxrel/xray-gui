@@ -93,10 +93,24 @@ public enum ConfigGenerator {
         }
 
         // DNS
-        if !settings.dnsServers.isEmpty {
-            config["dns"] = [
-                "servers": settings.dnsServers
-            ] as [String: Any]
+        switch settings.dnsMode {
+        case .plain:
+            if !settings.dnsServers.isEmpty {
+                config["dns"] = [
+                    "servers": settings.dnsServers
+                ] as [String: Any]
+            }
+        case .doh:
+            let dohAddress = ConfigGenerator.xrayDoHAddress(settings.dohServer)
+            if !dohAddress.isEmpty {
+                config["dns"] = [
+                    "servers": [
+                        dohAddress,
+                        "localhost"
+                    ],
+                    "queryStrategy": "UseIP"
+                ] as [String: Any]
+            }
         }
 
         return config
@@ -188,6 +202,21 @@ public enum ConfigGenerator {
         }
 
         return stream
+    }
+
+    /// Converts a user-facing `https://` DoH URL to Xray's `https+local://` format.
+    /// The `+local` prefix tells Xray to resolve the DoH server via system DNS,
+    /// avoiding circular resolution. Returns empty string for invalid input.
+    static func xrayDoHAddress(_ url: String) -> String {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if trimmed.hasPrefix("https+local://") { return trimmed }
+        if trimmed.hasPrefix("https://") {
+            let afterScheme = trimmed.dropFirst("https://".count)
+            return "https+local://\(afterScheme)"
+        }
+        if trimmed.hasPrefix("http://") { return "" }
+        return "https+local://\(trimmed)"
     }
 
     public static func buildRoutingRules(settings: AppSettings) -> [[String: Any]] {
