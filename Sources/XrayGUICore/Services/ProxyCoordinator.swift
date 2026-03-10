@@ -222,19 +222,25 @@ public final class ProxyCoordinator {
     }
 
     public func startProxy(server: ServerConfig) async throws {
+        let clock = ContinuousClock()
+        let totalStart = clock.now
         let tunnelId = Tunnel.primaryId
         let configURL = store.configFileURL(for: tunnelId)
         try ConfigGenerator.writeConfig(server: server, settings: settings, to: configURL)
 
+        let xrayStart = clock.now
         try await xrayManager.start(tunnelId: tunnelId, configPath: configURL.path, socksPort: settings.socksPort)
+        let xrayDuration = xrayStart.duration(to: clock.now)
 
         // Apply system proxy
+        let proxyStart = clock.now
         await proxyManager.applyProxyMode(
             settings.proxyMode,
             httpPort: settings.httpPort,
             socksPort: settings.socksPort,
             pacUrl: settings.pacUrl
         )
+        let proxyDuration = proxyStart.duration(to: clock.now)
 
         // Update tunnels list
         let tunnel = Tunnel(
@@ -254,6 +260,7 @@ public final class ProxyCoordinator {
         saveTunnels()
 
         proxyStatus = makeProxyStatus(running: true, activeServer: server, startedAt: Date())
+        appendLog("[Perf] startProxy xray=\(ms(xrayDuration))ms proxy=\(ms(proxyDuration))ms total=\(ms(totalStart.duration(to: clock.now)))ms")
     }
 
     public func stopProxy() async throws {
@@ -536,5 +543,12 @@ public final class ProxyCoordinator {
 
     public func cleanup() async {
         await stopAllTunnels()
+    }
+
+    private func ms(_ duration: Duration) -> Int {
+        let components = duration.components
+        let seconds = Double(components.seconds) * 1_000
+        let attoseconds = Double(components.attoseconds) / 1_000_000_000_000_000
+        return max(0, Int((seconds + attoseconds).rounded()))
     }
 }

@@ -1,6 +1,10 @@
 import Foundation
 import Network
 
+private let xrayStartupReadyTimeout: Duration = .milliseconds(1500)
+private let xrayStartupAttemptTimeout: Duration = .milliseconds(250)
+private let xrayStartupPollInterval: Duration = .milliseconds(50)
+
 /// Thread-safe wrapper for the "already resumed" flag used in latency tests.
 private final class AtomicFlag: @unchecked Sendable {
     private var _value = false
@@ -62,6 +66,9 @@ public final class XrayManager: XrayManaging, @unchecked Sendable {
     }
 
     public func start(tunnelId: String, configPath: String, socksPort: Int) async throws {
+        let clock = ContinuousClock()
+        let totalStart = clock.now
+
         // Stop this specific tunnel if already running
         if isRunning(tunnelId: tunnelId) {
             try await stop(tunnelId: tunnelId)
@@ -117,32 +124,47 @@ public final class XrayManager: XrayManaging, @unchecked Sendable {
         attachReader(stdoutPipe)
         attachReader(stderrPipe)
 
-        // Health check: poll SOCKS port until Xray accepts connections (up to 5s)
-        let ready = await waitForTCPReady(port: UInt16(socksPort))
+        let readyWaitStart = clock.now
+        let ready = await waitForTCPReady(
+            port: UInt16(socksPort),
+            overallTimeout: xrayStartupReadyTimeout,
+            attemptTimeout: xrayStartupAttemptTimeout,
+            pollInterval: xrayStartupPollInterval
+        )
+        let readyWaitDuration = readyWaitStart.duration(to: clock.now)
         if !ready {
             if !proc.isRunning {
                 throw XrayError.startFailed("Xray process exited unexpectedly during startup")
             }
-            logCallback?("[\(tunnelId)] Warning: SOCKS port \(socksPort) not responding after 5s, proceeding anyway")
+            logCallback?("[\(tunnelId)] [Perf] SOCKS port \(socksPort) not ready after \(Self.ms(readyWaitDuration))ms, proceeding")
         }
+
+        let totalDuration = totalStart.duration(to: clock.now)
+        logCallback?("[\(tunnelId)] [Perf] start total=\(Self.ms(totalDuration))ms readiness=\(Self.ms(readyWaitDuration))ms")
         startDates[tunnelId] = Date()
     }
 
-    /// Polls 127.0.0.1:port every 200 ms until a TCP connection succeeds or 5 seconds elapse.
+    /// Polls 127.0.0.1:port until a TCP connection succeeds or the timeout elapses.
     /// Returns `true` if the port became ready within the timeout.
-    nonisolated private func waitForTCPReady(port: UInt16) async -> Bool {
-        let deadline = DispatchTime.now() + 5.0
-        while DispatchTime.now() < deadline {
-            let connected = await singleTCPConnect(port: port)
+    nonisolated func waitForTCPReady(
+        port: UInt16,
+        overallTimeout: Duration,
+        attemptTimeout: Duration,
+        pollInterval: Duration
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let start = clock.now
+        while start.duration(to: clock.now) < overallTimeout {
+            let connected = await singleTCPConnect(port: port, timeout: attemptTimeout)
             if connected { return true }
-            try? await Task.sleep(for: .milliseconds(200))
+            try? await Task.sleep(for: pollInterval)
         }
         return false
     }
 
-    /// Attempts a single TCP connection to 127.0.0.1:port with a 1-second per-attempt timeout.
+    /// Attempts a single TCP connection to 127.0.0.1:port with a bounded per-attempt timeout.
     /// Returns `true` if the connection reached `.ready`.
-    nonisolated private func singleTCPConnect(port: UInt16) async -> Bool {
+    nonisolated private func singleTCPConnect(port: UInt16, timeout: Duration) async -> Bool {
         await withCheckedContinuation { continuation in
             guard let nwPort = NWEndpoint.Port(rawValue: port) else {
                 continuation.resume(returning: false)
@@ -152,7 +174,7 @@ public final class XrayManager: XrayManaging, @unchecked Sendable {
             let resumed = AtomicFlag()
 
             let timer = DispatchSource.makeTimerSource(queue: .global())
-            timer.schedule(deadline: .now() + 1)
+            timer.schedule(deadline: .now() + Self.seconds(timeout))
             timer.setEventHandler {
                 guard resumed.testAndSet() else { return }
                 connection.cancel()
@@ -178,6 +200,18 @@ public final class XrayManager: XrayManaging, @unchecked Sendable {
 
             connection.start(queue: .global())
         }
+    }
+
+    nonisolated private static func seconds(_ duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+    }
+
+    nonisolated private static func ms(_ duration: Duration) -> Int {
+        let components = duration.components
+        let seconds = Double(components.seconds) * 1_000
+        let attoseconds = Double(components.attoseconds) / 1_000_000_000_000_000
+        return max(0, Int((seconds + attoseconds).rounded()))
     }
 
     public func stop(tunnelId: String) async throws {

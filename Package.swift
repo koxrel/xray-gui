@@ -23,6 +23,11 @@ let package = Package(
             name: "XrayGUICoreTests",
             dependencies: ["XrayGUICore"],
             path: "Tests/XrayGUICoreTests"
+        ),
+        .testTarget(
+            name: "XrayGUITests",
+            dependencies: ["XrayGUI"],
+            path: "Tests/XrayGUITests"
         )
     ]
 )

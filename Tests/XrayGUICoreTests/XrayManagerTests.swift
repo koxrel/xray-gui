@@ -1,11 +1,53 @@
 import Testing
 import Foundation
+import Network
 @testable import XrayGUICore
 
 /// Minimal reference-type container for capturing mutable state inside `@Sendable` closures in tests.
 private final class Box<T>: @unchecked Sendable {
     var value: T
     init(_ value: T) { self.value = value }
+}
+
+private final class TestTCPListener: @unchecked Sendable {
+    private let listener: NWListener
+
+    private init(listener: NWListener) {
+        self.listener = listener
+    }
+
+    var port: UInt16 {
+        listener.port!.rawValue
+    }
+
+    static func start() async throws -> TestTCPListener {
+        let listener = try NWListener(using: .tcp, on: .any)
+        return try await withCheckedThrowingContinuation { continuation in
+            let resumed = Box(false)
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    guard resumed.value == false else { return }
+                    resumed.value = true
+                    continuation.resume(returning: TestTCPListener(listener: listener))
+                case .failed(let error):
+                    guard resumed.value == false else { return }
+                    resumed.value = true
+                    continuation.resume(throwing: error)
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { connection in
+                connection.cancel()
+            }
+            listener.start(queue: .global())
+        }
+    }
+
+    func stop() {
+        listener.cancel()
+    }
 }
 
 // MARK: - MockXrayManager Tests
@@ -293,5 +335,39 @@ struct XrayManagerTests {
         manager.logCallback = { msg in received.value = msg }
         manager.logCallback?("test message")
         #expect(received.value == "test message")
+    }
+
+    @Test("waitForTCPReady succeeds quickly when a listener is already bound")
+    func waitForTCPReadySucceedsForOpenPort() async throws {
+        let listener = try await TestTCPListener.start()
+        defer { listener.stop() }
+
+        let manager = XrayManager()
+        let ready = await manager.waitForTCPReady(
+            port: listener.port,
+            overallTimeout: Duration.milliseconds(400),
+            attemptTimeout: Duration.milliseconds(100),
+            pollInterval: Duration.milliseconds(25)
+        )
+
+        #expect(ready == true)
+    }
+
+    @Test("waitForTCPReady respects the provided timeout for closed ports")
+    func waitForTCPReadyRespectsCustomTimeout() async {
+        let manager = XrayManager()
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        let ready = await manager.waitForTCPReady(
+            port: 65099,
+            overallTimeout: Duration.milliseconds(350),
+            attemptTimeout: Duration.milliseconds(100),
+            pollInterval: Duration.milliseconds(25)
+        )
+
+        let elapsed = start.duration(to: clock.now)
+        #expect(ready == false)
+        #expect(elapsed < .milliseconds(800))
     }
 }

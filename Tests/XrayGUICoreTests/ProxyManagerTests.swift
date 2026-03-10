@@ -2,6 +2,45 @@ import Testing
 import Foundation
 @testable import XrayGUICore
 
+private extension NSLock {
+    func withLock<T>(_ body: () -> T) -> T {
+        lock()
+        defer { unlock() }
+        return body()
+    }
+}
+
+private final class RecordingNetworkSetupExecutor: NetworkSetupExecuting, @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var asyncCommands: [[String]] = []
+    private(set) var syncCommands: [[String]] = []
+    var listServicesOutput = """
+    An asterisk (*) denotes that a network service is disabled.
+    Wi-Fi
+    Ethernet
+    """
+
+    func run(_ args: [String]) async -> String {
+        lock.withLock {
+            asyncCommands.append(args)
+        }
+        if args == ["-listallnetworkservices"] {
+            return listServicesOutput
+        }
+        return ""
+    }
+
+    func runSync(_ args: [String]) -> String {
+        lock.withLock {
+            syncCommands.append(args)
+        }
+        if args == ["-listallnetworkservices"] {
+            return listServicesOutput
+        }
+        return ""
+    }
+}
+
 // MARK: - Mock Protocol Tests
 
 @Suite("MockProxyManager Tests")
@@ -383,5 +422,44 @@ struct ProxyManagerTests {
         #expect(spy.disableProxyCallCount == 1)
         #expect(spy.enableGlobalProxyCalls.isEmpty)
         #expect(spy.enablePacProxyCalls.isEmpty)
+    }
+
+    @Test("DefaultProxyManager manual mode skips cleanup when proxy was never enabled this session")
+    @MainActor
+    func manualModeSkipsCleanupWhenUnmanaged() async {
+        let executor = RecordingNetworkSetupExecutor()
+        let manager = DefaultProxyManager(executor: executor)
+
+        await manager.applyProxyMode(.manual, httpPort: 1087, socksPort: 1080, pacUrl: "")
+
+        #expect(executor.asyncCommands.isEmpty)
+    }
+
+    @Test("DefaultProxyManager clears managed proxy once and then stops shelling out")
+    @MainActor
+    func manualModeClearsManagedProxyOnlyOnce() async {
+        let executor = RecordingNetworkSetupExecutor()
+        let manager = DefaultProxyManager(executor: executor)
+
+        await manager.applyProxyMode(.global, httpPort: 1087, socksPort: 1080, pacUrl: "")
+        let afterEnable = executor.asyncCommands.count
+        await manager.applyProxyMode(.manual, httpPort: 1087, socksPort: 1080, pacUrl: "")
+        let afterFirstManual = executor.asyncCommands.count
+        await manager.applyProxyMode(.manual, httpPort: 1087, socksPort: 1080, pacUrl: "")
+
+        #expect(afterEnable > 0)
+        #expect(afterFirstManual > afterEnable)
+        #expect(executor.asyncCommands.count == afterFirstManual)
+    }
+
+    @Test("DefaultProxyManager synchronous cleanup skips shell work when unmanaged")
+    @MainActor
+    func syncCleanupSkipsWhenUnmanaged() {
+        let executor = RecordingNetworkSetupExecutor()
+        let manager = DefaultProxyManager(executor: executor)
+
+        manager.disableProxySync()
+
+        #expect(executor.syncCommands.isEmpty)
     }
 }
