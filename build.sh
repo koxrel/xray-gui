@@ -6,49 +6,63 @@ cd "$PROJECT_ROOT"
 
 APP_NAME="XrayGUI"
 BUILD_DIR=".build/release"
-APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 INSTALL_DIR="/Applications"
+APP_BUNDLE_ID="com.xraygui.app"
 
-echo "Building $APP_NAME in release mode..."
-swift build -c release
+wait_for_process_exit() {
+    local process_name="$1"
+    local timeout_seconds="${2:-10}"
+    local attempts=$((timeout_seconds * 2))
 
-echo "Build complete: $BUILD_DIR/$APP_NAME"
+    while pgrep -x "$process_name" >/dev/null 2>&1; do
+        if [ "$attempts" -le 0 ]; then
+            return 1
+        fi
+        sleep 0.5
+        attempts=$((attempts - 1))
+    done
+}
 
-# Launch or install
-case "${1:-run}" in
-    run)
-        echo "Launching $APP_NAME..."
-        exec "$BUILD_DIR/$APP_NAME"
-        ;;
-    install)
-        echo "Installing to $INSTALL_DIR..."
-        # Kill running instance if any
-        pkill -x "$APP_NAME" 2>/dev/null && sleep 0.5 || true
-        if [ -d "$INSTALL_DIR/$APP_NAME.app" ]; then
-            rm -rf "$INSTALL_DIR/$APP_NAME.app"
-        fi
-        # SwiftPM executable targets don't produce .app bundles,
-        # so copy the binary and resources into a minimal wrapper
-        mkdir -p "$INSTALL_DIR/$APP_NAME.app/Contents/MacOS"
-        mkdir -p "$INSTALL_DIR/$APP_NAME.app/Contents/Resources"
-        cp "$BUILD_DIR/$APP_NAME" "$INSTALL_DIR/$APP_NAME.app/Contents/MacOS/"
-        # Copy xray-core resources into the app bundle
-        XRAY_SRC="$PROJECT_ROOT/Resources/xray-core"
-        if [ -d "$XRAY_SRC" ]; then
-            cp -R "$XRAY_SRC" "$INSTALL_DIR/$APP_NAME.app/Contents/Resources/"
-            echo "Bundled xray-core resources."
-        else
-            echo "WARNING: xray-core not found at $XRAY_SRC — app will not work without it."
-        fi
-        # Copy app icon into the bundle
-        ICON_SRC="$PROJECT_ROOT/Resources/AppIcon.icns"
-        if [ -f "$ICON_SRC" ]; then
-            cp "$ICON_SRC" "$INSTALL_DIR/$APP_NAME.app/Contents/Resources/"
-            echo "Bundled app icon."
-        else
-            echo "WARNING: AppIcon.icns not found — run: swift tools/generate-app-icon.swift"
-        fi
-        cat > "$INSTALL_DIR/$APP_NAME.app/Contents/Info.plist" <<'PLIST'
+graceful_quit_app() {
+    if ! pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Requesting $APP_NAME to quit..."
+    osascript -e "tell application id \"$APP_BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+
+    if wait_for_process_exit "$APP_NAME" 10; then
+        return 0
+    fi
+
+    echo "ERROR: $APP_NAME did not exit cleanly within 10 seconds. Aborting install to avoid state loss." >&2
+    return 1
+}
+
+create_app_bundle() {
+    local destination="$1"
+
+    mkdir -p "$destination/Contents/MacOS"
+    mkdir -p "$destination/Contents/Resources"
+    cp "$BUILD_DIR/$APP_NAME" "$destination/Contents/MacOS/"
+
+    local xray_src="$PROJECT_ROOT/Resources/xray-core"
+    if [ -d "$xray_src" ]; then
+        cp -R "$xray_src" "$destination/Contents/Resources/"
+        echo "Bundled xray-core resources."
+    else
+        echo "WARNING: xray-core not found at $xray_src — app will not work without it."
+    fi
+
+    local icon_src="$PROJECT_ROOT/Resources/AppIcon.icns"
+    if [ -f "$icon_src" ]; then
+        cp "$icon_src" "$destination/Contents/Resources/"
+        echo "Bundled app icon."
+    else
+        echo "WARNING: AppIcon.icns not found — run: swift tools/generate-app-icon.swift"
+    fi
+
+    cat > "$destination/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -69,6 +83,43 @@ case "${1:-run}" in
 </dict>
 </plist>
 PLIST
+}
+
+sync_app_bundle() {
+    local source="$1"
+    local destination="$2"
+
+    mkdir -p "$destination"
+    rsync -a --delete "$source/" "$destination/"
+}
+
+echo "Building $APP_NAME in release mode..."
+swift build -c release
+
+echo "Build complete: $BUILD_DIR/$APP_NAME"
+
+# Launch or install
+case "${1:-run}" in
+    run)
+        echo "Launching $APP_NAME..."
+        exec "$BUILD_DIR/$APP_NAME"
+        ;;
+    install)
+        echo "Installing to $INSTALL_DIR..."
+        graceful_quit_app
+
+        temp_dir="$(mktemp -d)"
+        cleanup_temp_dir() {
+            rm -rf "$temp_dir"
+        }
+        trap cleanup_temp_dir EXIT
+
+        temp_bundle="$temp_dir/$APP_NAME.app"
+        create_app_bundle "$temp_bundle"
+        sync_app_bundle "$temp_bundle" "$INSTALL_DIR/$APP_NAME.app"
+
+        trap - EXIT
+        cleanup_temp_dir
         echo "Installed to $INSTALL_DIR/$APP_NAME.app"
         echo "Opening..."
         open "$INSTALL_DIR/$APP_NAME.app"

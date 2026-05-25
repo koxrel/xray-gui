@@ -1,7 +1,13 @@
 import Foundation
 
 public enum ConfigGenerator {
-    public static func generateXrayConfig(server: ServerConfig, settings: AppSettings, httpPort: Int? = nil, socksPort: Int? = nil) -> [String: Any] {
+    public static func generateXrayConfig(
+        server: ServerConfig,
+        settings: AppSettings,
+        httpPort: Int? = nil,
+        socksPort: Int? = nil,
+        statsAPIPort: Int? = nil
+    ) -> [String: Any] {
         let listen = settings.allowLan ? "0.0.0.0" : "127.0.0.1"
         let effectiveHttpPort = max(1, min(httpPort ?? settings.httpPort, 65535))
         let effectiveSocksPort = max(1, min(socksPort ?? settings.socksPort, 65535))
@@ -77,6 +83,21 @@ public enum ConfigGenerator {
             "inbounds": [httpInbound, socksInbound],
             "outbounds": [proxyOutbound, directOutbound, blockOutbound]
         ]
+
+        if let statsAPIPort {
+            config["api"] = [
+                "tag": "api",
+                "listen": "127.0.0.1:\(statsAPIPort)",
+                "services": ["StatsService"]
+            ] as [String: Any]
+            config["stats"] = [:] as [String: Any]
+            config["policy"] = [
+                "system": [
+                    "statsInboundUplink": true,
+                    "statsInboundDownlink": true
+                ] as [String: Any]
+            ] as [String: Any]
+        }
 
         // Log
         config["log"] = [
@@ -256,8 +277,21 @@ public enum ConfigGenerator {
         return rules
     }
 
-    public static func writeConfig(server: ServerConfig, settings: AppSettings, httpPort: Int? = nil, socksPort: Int? = nil, to url: URL) throws {
-        let config = generateXrayConfig(server: server, settings: settings, httpPort: httpPort, socksPort: socksPort)
+    public static func writeConfig(
+        server: ServerConfig,
+        settings: AppSettings,
+        httpPort: Int? = nil,
+        socksPort: Int? = nil,
+        statsAPIPort: Int? = nil,
+        to url: URL
+    ) throws {
+        let config = generateXrayConfig(
+            server: server,
+            settings: settings,
+            httpPort: httpPort,
+            socksPort: socksPort,
+            statsAPIPort: statsAPIPort
+        )
         let jsonData = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
         try jsonData.write(to: url, options: .atomic)
     }

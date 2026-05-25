@@ -8,12 +8,14 @@ public final class Store: Storing, Sendable {
         let appDir = appSupport.appendingPathComponent("XrayGUI", isDirectory: true)
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         self.fileURL = appDir.appendingPathComponent("xray-gui-data.json")
+        print("[Store] Using store file: \(fileURL.path)")
     }
 
     // MARK: - Persistence
 
     public func load() -> StoreData {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            print("[Store] No store file found at \(fileURL.path); using defaults.")
             return StoreData()
         }
         do {
@@ -26,9 +28,10 @@ public final class Store: Storing, Sendable {
             if result.settings.socksPort == 0 { result.settings.socksPort = defaults.socksPort }
             if result.settings.dnsServers.isEmpty { result.settings.dnsServers = defaults.dnsServers }
             if result.settings.bypassDomains.isEmpty { result.settings.bypassDomains = defaults.bypassDomains }
+            print("[Store] Loaded store from \(fileURL.path)")
             return result
         } catch {
-            print("Failed to load store: \(error). Backing up corrupted file.")
+            print("[Store] Failed to load store at \(fileURL.path): \(error). Backing up corrupted file.")
             let backupURL = fileURL.deletingPathExtension().appendingPathExtension("corrupted.json")
             try? FileManager.default.moveItem(at: fileURL, to: backupURL)
             return StoreData()

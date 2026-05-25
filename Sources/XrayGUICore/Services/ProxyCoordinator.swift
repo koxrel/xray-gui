@@ -20,6 +20,7 @@ public final class ProxyCoordinator {
     public var settings: AppSettings = .default
     public var proxyStatus: ProxyStatus = ProxyStatus()
     public var tunnels: [Tunnel] = []
+    public var tunnelStatistics: [TunnelStatisticsSnapshot] = []
     public var logs: [String] = []
     public var isLoading = false
 
@@ -27,13 +28,22 @@ public final class ProxyCoordinator {
     public let store: any Storing
     public let xrayManager: any XrayManaging
     public let proxyManager: any ProxyManaging
+    private let statsClient: any TunnelStatsQuerying
 
     private let logBufferMax = 1000
+    private let statsAPIBasePort = 10085
+    private var tunnelStatsAPIPorts: [String: Int] = [:]
 
-    public init(store: any Storing, xrayManager: any XrayManaging, proxyManager: any ProxyManaging) {
+    public init(
+        store: any Storing,
+        xrayManager: any XrayManaging,
+        proxyManager: any ProxyManaging,
+        statsClient: any TunnelStatsQuerying = XrayStatsClient()
+    ) {
         self.store = store
         self.xrayManager = xrayManager
         self.proxyManager = proxyManager
+        self.statsClient = statsClient
     }
 
     public func setupLogCallback() {
@@ -60,6 +70,8 @@ public final class ProxyCoordinator {
             tunnels[i].startedAt = nil
         }
 
+        tunnelStatistics.removeAll()
+        tunnelStatsAPIPorts.removeAll()
         proxyStatus = makeProxyStatus(running: false)
     }
 
@@ -226,7 +238,8 @@ public final class ProxyCoordinator {
         let totalStart = clock.now
         let tunnelId = Tunnel.primaryId
         let configURL = store.configFileURL(for: tunnelId)
-        try ConfigGenerator.writeConfig(server: server, settings: settings, to: configURL)
+        let statsAPIPort = statsAPIPort(for: tunnelId)
+        try ConfigGenerator.writeConfig(server: server, settings: settings, statsAPIPort: statsAPIPort, to: configURL)
 
         let xrayStart = clock.now
         try await xrayManager.start(tunnelId: tunnelId, configPath: configURL.path, socksPort: settings.socksPort)
@@ -257,6 +270,7 @@ public final class ProxyCoordinator {
         } else {
             tunnels.insert(tunnel, at: 0)
         }
+        resetTunnelStatistics(for: tunnelId)
         saveTunnels()
 
         proxyStatus = makeProxyStatus(running: true, activeServer: server, startedAt: Date())
@@ -270,6 +284,8 @@ public final class ProxyCoordinator {
         await proxyManager.disableProxy()
 
         tunnels.removeAll { $0.id == tunnelId }
+        tunnelStatsAPIPorts.removeValue(forKey: tunnelId)
+        resetTunnelStatistics(for: tunnelId)
         saveTunnels()
 
         proxyStatus = makeProxyStatus(running: false)
@@ -294,7 +310,8 @@ public final class ProxyCoordinator {
     private func restartProxy(server: ServerConfig) async throws {
         let tunnelId = Tunnel.primaryId
         let configURL = store.configFileURL(for: tunnelId)
-        try ConfigGenerator.writeConfig(server: server, settings: settings, to: configURL)
+        let statsAPIPort = statsAPIPort(for: tunnelId)
+        try ConfigGenerator.writeConfig(server: server, settings: settings, statsAPIPort: statsAPIPort, to: configURL)
         try await xrayManager.restart(tunnelId: tunnelId, configPath: configURL.path, socksPort: settings.socksPort)
 
         await proxyManager.applyProxyMode(
@@ -316,6 +333,7 @@ public final class ProxyCoordinator {
                 startedAt: Date()
             )
         }
+        resetTunnelStatistics(for: tunnelId)
         saveTunnels()
 
         proxyStatus.activeServer = server
@@ -368,7 +386,15 @@ public final class ProxyCoordinator {
         let finalSocks = socksPort ?? defaults.socks
 
         let configURL = store.configFileURL(for: tunnelId)
-        try ConfigGenerator.writeConfig(server: server, settings: settings, httpPort: finalHttp, socksPort: finalSocks, to: configURL)
+        let statsAPIPort = statsAPIPort(for: tunnelId)
+        try ConfigGenerator.writeConfig(
+            server: server,
+            settings: settings,
+            httpPort: finalHttp,
+            socksPort: finalSocks,
+            statsAPIPort: statsAPIPort,
+            to: configURL
+        )
 
         try await xrayManager.start(tunnelId: tunnelId, configPath: configURL.path, socksPort: finalSocks)
 
@@ -382,6 +408,7 @@ public final class ProxyCoordinator {
             startedAt: Date()
         )
         tunnels.append(tunnel)
+        resetTunnelStatistics(for: tunnelId)
         saveTunnels()
         return tunnel
     }
@@ -403,9 +430,18 @@ public final class ProxyCoordinator {
             }
             try await xrayManager.stop(tunnelId: tunnelId)
             let configURL = store.configFileURL(for: tunnelId)
-            try ConfigGenerator.writeConfig(server: server, settings: settings, httpPort: httpPort, socksPort: socksPort, to: configURL)
+            let statsAPIPort = statsAPIPort(for: tunnelId)
+            try ConfigGenerator.writeConfig(
+                server: server,
+                settings: settings,
+                httpPort: httpPort,
+                socksPort: socksPort,
+                statsAPIPort: statsAPIPort,
+                to: configURL
+            )
             try await xrayManager.start(tunnelId: tunnelId, configPath: configURL.path, socksPort: socksPort)
             tunnels[idx].startedAt = Date()
+            resetTunnelStatistics(for: tunnelId)
 
             // If this is the primary tunnel, update system proxy too
             if tunnelId == Tunnel.primaryId {
@@ -430,6 +466,7 @@ public final class ProxyCoordinator {
             tunnels[idx].running = false
             tunnels[idx].startedAt = nil
         }
+        resetTunnelStatistics(for: tunnelId)
         saveTunnels()
     }
 
@@ -441,11 +478,20 @@ public final class ProxyCoordinator {
         }
 
         let configURL = store.configFileURL(for: tunnelId)
-        try ConfigGenerator.writeConfig(server: server, settings: settings, httpPort: tunnel.httpPort, socksPort: tunnel.socksPort, to: configURL)
+        let statsAPIPort = statsAPIPort(for: tunnelId)
+        try ConfigGenerator.writeConfig(
+            server: server,
+            settings: settings,
+            httpPort: tunnel.httpPort,
+            socksPort: tunnel.socksPort,
+            statsAPIPort: statsAPIPort,
+            to: configURL
+        )
         try await xrayManager.start(tunnelId: tunnelId, configPath: configURL.path, socksPort: tunnel.socksPort)
 
         tunnels[idx].running = true
         tunnels[idx].startedAt = Date()
+        resetTunnelStatistics(for: tunnelId)
         saveTunnels()
     }
 
@@ -467,6 +513,8 @@ public final class ProxyCoordinator {
         }
         store.removeConfigFile(for: tunnelId)
         tunnels.removeAll { $0.id == tunnelId }
+        tunnelStatsAPIPorts.removeValue(forKey: tunnelId)
+        resetTunnelStatistics(for: tunnelId)
         saveTunnels()
     }
 
@@ -484,6 +532,8 @@ public final class ProxyCoordinator {
             store.removeConfigFile(for: tunnelId)
         }
         tunnels.removeAll()
+        tunnelStatsAPIPorts.removeAll()
+        tunnelStatistics.removeAll()
         saveTunnels()
 
         await proxyManager.disableProxy()
@@ -492,6 +542,10 @@ public final class ProxyCoordinator {
 
     public var hasPausedTunnels: Bool {
         tunnels.contains { !$0.running }
+    }
+
+    public var tunnelStatisticsSummary: TunnelStatisticsSummary {
+        TunnelStatisticsSummary(snapshots: tunnelStatistics)
     }
 
     public func nextAvailablePortsPreview() -> (http: Int, socks: Int) {
@@ -514,6 +568,138 @@ public final class ProxyCoordinator {
             }
         }
         return (http: httpPort, socks: socksPort)
+    }
+
+    public func refreshTunnelStatistics(now: Date = Date()) async {
+        let activeTunnels = tunnels.filter(\.running)
+        guard !activeTunnels.isEmpty else {
+            tunnelStatistics.removeAll()
+            return
+        }
+
+        let previousById = Dictionary(uniqueKeysWithValues: tunnelStatistics.map { ($0.id, $0) })
+        let apiPorts = Dictionary(uniqueKeysWithValues: activeTunnels.map { ($0.id, statsAPIPort(for: $0.id)) })
+
+        let results = await withTaskGroup(of: (String, Result<TunnelTrafficStats, Error>).self, returning: [String: Result<TunnelTrafficStats, Error>].self) { group in
+            for tunnel in activeTunnels {
+                guard let apiPort = apiPorts[tunnel.id] else { continue }
+                let statsClient = self.statsClient
+                group.addTask {
+                    do {
+                        return (tunnel.id, .success(try await statsClient.queryStats(apiPort: apiPort)))
+                    } catch {
+                        return (tunnel.id, .failure(error))
+                    }
+                }
+            }
+
+            var aggregated: [String: Result<TunnelTrafficStats, Error>] = [:]
+            for await (tunnelId, result) in group {
+                aggregated[tunnelId] = result
+            }
+            return aggregated
+        }
+
+        tunnelStatistics = activeTunnels.map { tunnel in
+            let previous = previousById[tunnel.id]
+            switch results[tunnel.id] {
+            case let .success(traffic):
+                return makeStatisticsSnapshot(for: tunnel, traffic: traffic, previous: previous, now: now)
+            case .failure, .none:
+                return makeUnavailableStatisticsSnapshot(for: tunnel, previous: previous)
+            }
+        }
+    }
+
+    private func statsAPIPort(for tunnelId: String) -> Int {
+        if let existing = tunnelStatsAPIPorts[tunnelId] {
+            return existing
+        }
+        let allocated = nextAvailableStatsAPIPort()
+        tunnelStatsAPIPorts[tunnelId] = allocated
+        return allocated
+    }
+
+    private func nextAvailableStatsAPIPort() -> Int {
+        let usedPorts = Set(tunnels.flatMap { [$0.httpPort, $0.socksPort] })
+            .union(tunnelStatsAPIPorts.values)
+        var port = statsAPIBasePort
+
+        while usedPorts.contains(port) {
+            port += 1
+            if port > 65535 {
+                appendLog("[Tunnel] No available stats API ports in valid range (1-65535)")
+                return statsAPIBasePort
+            }
+        }
+
+        return port
+    }
+
+    private func resetTunnelStatistics(for tunnelId: String) {
+        tunnelStatistics.removeAll { $0.id == tunnelId }
+    }
+
+    private func makeStatisticsSnapshot(
+        for tunnel: Tunnel,
+        traffic: TunnelTrafficStats,
+        previous: TunnelStatisticsSnapshot?,
+        now: Date
+    ) -> TunnelStatisticsSnapshot {
+        let uploadRate = rate(
+            current: traffic.uplinkBytes,
+            previous: previous?.uplinkBytes,
+            previousDate: previous?.lastUpdated,
+            now: now
+        )
+        let downloadRate = rate(
+            current: traffic.downlinkBytes,
+            previous: previous?.downlinkBytes,
+            previousDate: previous?.lastUpdated,
+            now: now
+        )
+
+        return TunnelStatisticsSnapshot(
+            id: tunnel.id,
+            serverName: tunnel.serverName,
+            httpPort: tunnel.httpPort,
+            socksPort: tunnel.socksPort,
+            startedAt: tunnel.startedAt,
+            isPrimary: tunnel.id == Tunnel.primaryId,
+            isAvailable: true,
+            lastUpdated: now,
+            uplinkBytes: traffic.uplinkBytes,
+            downlinkBytes: traffic.downlinkBytes,
+            uploadRateBytesPerSecond: uploadRate,
+            downloadRateBytesPerSecond: downloadRate
+        )
+    }
+
+    private func makeUnavailableStatisticsSnapshot(
+        for tunnel: Tunnel,
+        previous: TunnelStatisticsSnapshot?
+    ) -> TunnelStatisticsSnapshot {
+        TunnelStatisticsSnapshot(
+            id: tunnel.id,
+            serverName: tunnel.serverName,
+            httpPort: tunnel.httpPort,
+            socksPort: tunnel.socksPort,
+            startedAt: tunnel.startedAt,
+            isPrimary: tunnel.id == Tunnel.primaryId,
+            isAvailable: false,
+            lastUpdated: previous?.lastUpdated,
+            uplinkBytes: previous?.uplinkBytes ?? 0,
+            downlinkBytes: previous?.downlinkBytes ?? 0,
+            uploadRateBytesPerSecond: 0,
+            downloadRateBytesPerSecond: 0
+        )
+    }
+
+    private func rate(current: UInt64, previous: UInt64?, previousDate: Date?, now: Date) -> Double {
+        guard let previous, let previousDate else { return 0 }
+        let elapsed = now.timeIntervalSince(previousDate)
+        guard elapsed > 0, current >= previous else { return 0 }
+        return Double(current - previous) / elapsed
     }
 
     // MARK: - Shell Export

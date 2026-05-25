@@ -359,4 +359,33 @@ struct ConfigGeneratorEdgeCaseTests {
 
         #expect(FileManager.default.fileExists(atPath: url.path))
     }
+
+    @Test("stats-enabled config passes bundled Xray validation")
+    @MainActor func statsEnabledConfigPassesXrayValidation() throws {
+        let server = ServerConfig(name: "Stats Validation", address: "stats.example.com", port: 443, uuid: "suuid")
+        let settings = AppSettings.default
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xray-stats-validate-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try ConfigGenerator.writeConfig(
+            server: server,
+            settings: settings,
+            statsAPIPort: 10085,
+            to: url
+        )
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: XrayManager().getXrayBinaryPath())
+        process.arguments = ["run", "-test", "-c", url.path]
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        #expect(process.terminationStatus == 0, "Expected Xray config validation to pass, got output: \(output)")
+    }
 }

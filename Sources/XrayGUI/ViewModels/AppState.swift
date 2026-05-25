@@ -40,6 +40,14 @@ final class AppState {
         set { coordinator.logs = newValue }
     }
 
+    var tunnelStatistics: [TunnelStatisticsSnapshot] {
+        coordinator.tunnelStatistics
+    }
+
+    var tunnelStatisticsSummary: TunnelStatisticsSummary {
+        coordinator.tunnelStatisticsSummary
+    }
+
     var isLoading: Bool {
         get { coordinator.isLoading }
         set { coordinator.isLoading = newValue }
@@ -215,6 +223,10 @@ final class AppState {
 
     func nextAvailablePortsPreview() -> (http: Int, socks: Int) {
         coordinator.nextAvailablePortsPreview()
+    }
+
+    func refreshTunnelStatistics(now: Date = Date()) async {
+        await coordinator.refreshTunnelStatistics(now: now)
     }
 
     // MARK: - Shell Export

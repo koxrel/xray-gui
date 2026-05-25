@@ -49,6 +49,21 @@ private func makeCoordinator(
     return (coordinator, s, x, p)
 }
 
+@MainActor
+private func makeCoordinatorWithStats(
+    store: MockStore? = nil,
+    xrayManager: MockXrayManager? = nil,
+    proxyManager: MockProxyManager? = nil,
+    statsClient: MockTunnelStatsClient? = nil
+) -> (ProxyCoordinator, MockStore, MockXrayManager, MockProxyManager, MockTunnelStatsClient) {
+    let s = store ?? MockStore()
+    let x = xrayManager ?? MockXrayManager()
+    let p = proxyManager ?? MockProxyManager()
+    let stats = statsClient ?? MockTunnelStatsClient()
+    let coordinator = ProxyCoordinator(store: s, xrayManager: x, proxyManager: p, statsClient: stats)
+    return (coordinator, s, x, p, stats)
+}
+
 /// Ensure the temp config directory exists so ConfigGenerator.writeConfig succeeds.
 private func ensureTempConfigDir() {
     let dir = FileManager.default.temporaryDirectory
@@ -729,6 +744,114 @@ struct MultiTunnelTests {
 
         #expect(x.startCalls.count > startsBefore)
         #expect(coordinator.tunnels.first?.running == true)
+    }
+}
+
+// MARK: - Tunnel Statistics Tests
+
+@Suite("ProxyCoordinator - Tunnel Statistics")
+struct TunnelStatisticsTests {
+
+    init() {
+        ensureTempConfigDir()
+    }
+
+    private func statsAPIPort(in store: MockStore, tunnelId: String) throws -> Int {
+        let data = try Data(contentsOf: store.configFileURL(for: tunnelId))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let api = parsed?["api"] as? [String: Any]
+        let listen = api?["listen"] as? String
+        let port = listen?.split(separator: ":").last.flatMap { Int($0) }
+        return try #require(port)
+    }
+
+    @Test("startProxy writes stats API config and refreshes primary tunnel statistics")
+    @MainActor func primaryTunnelStatisticsRefresh() async throws {
+        let server = makeServer(id: "s1", isActive: true)
+        let settings = AppSettings(activeServerId: "s1")
+        let store = MockStore(data: StoreData(servers: [server], settings: settings))
+        let statsClient = MockTunnelStatsClient()
+        let (coordinator, s, _, _, stats) = makeCoordinatorWithStats(store: store, statsClient: statsClient)
+        coordinator.loadData()
+
+        try await coordinator.startProxy(server: server)
+        let apiPort = try statsAPIPort(in: s, tunnelId: Tunnel.primaryId)
+        stats.stubbedByPort[apiPort] = TunnelTrafficStats(uplinkBytes: 128, downlinkBytes: 512)
+
+        await coordinator.refreshTunnelStatistics(now: Date(timeIntervalSince1970: 100))
+
+        #expect(coordinator.tunnelStatistics.count == 1)
+        let snapshot = try #require(coordinator.tunnelStatistics.first)
+        #expect(snapshot.id == Tunnel.primaryId)
+        #expect(snapshot.isAvailable == true)
+        #expect(snapshot.uplinkBytes == 128)
+        #expect(snapshot.downlinkBytes == 512)
+        #expect(snapshot.uploadRateBytesPerSecond == 0)
+        #expect(snapshot.downloadRateBytesPerSecond == 0)
+    }
+
+    @Test("refreshTunnelStatistics computes rates from previous sample")
+    @MainActor func statisticsRefreshComputesRates() async throws {
+        let server = makeServer(id: "s1", isActive: true)
+        let settings = AppSettings(activeServerId: "s1")
+        let store = MockStore(data: StoreData(servers: [server], settings: settings))
+        let statsClient = MockTunnelStatsClient()
+        let (coordinator, s, _, _, stats) = makeCoordinatorWithStats(store: store, statsClient: statsClient)
+        coordinator.loadData()
+
+        try await coordinator.startProxy(server: server)
+        let apiPort = try statsAPIPort(in: s, tunnelId: Tunnel.primaryId)
+
+        stats.stubbedByPort[apiPort] = TunnelTrafficStats(uplinkBytes: 100, downlinkBytes: 200)
+        await coordinator.refreshTunnelStatistics(now: Date(timeIntervalSince1970: 100))
+
+        stats.stubbedByPort[apiPort] = TunnelTrafficStats(uplinkBytes: 300, downlinkBytes: 700)
+        await coordinator.refreshTunnelStatistics(now: Date(timeIntervalSince1970: 102))
+
+        let snapshot = try #require(coordinator.tunnelStatistics.first)
+        #expect(snapshot.uplinkBytes == 300)
+        #expect(snapshot.downlinkBytes == 700)
+        #expect(snapshot.uploadRateBytesPerSecond == 100)
+        #expect(snapshot.downloadRateBytesPerSecond == 250)
+    }
+
+    @Test("tunnel statistics keep prior totals when one tunnel query fails")
+    @MainActor func statisticsFailureIsIsolatedPerTunnel() async throws {
+        let s1 = makeServer(id: "s1", isActive: true)
+        let s2 = makeServer(id: "s2")
+        let settings = AppSettings(activeServerId: "s1")
+        let store = MockStore(data: StoreData(servers: [s1, s2], settings: settings))
+        let statsClient = MockTunnelStatsClient()
+        let (coordinator, s, _, _, stats) = makeCoordinatorWithStats(store: store, statsClient: statsClient)
+        coordinator.loadData()
+
+        try await coordinator.startProxy(server: s1)
+        let extraTunnel = try await coordinator.addTunnel(serverId: "s2")
+
+        let primaryPort = try statsAPIPort(in: s, tunnelId: Tunnel.primaryId)
+        let extraPort = try statsAPIPort(in: s, tunnelId: extraTunnel.id)
+
+        stats.stubbedByPort[primaryPort] = TunnelTrafficStats(uplinkBytes: 100, downlinkBytes: 200)
+        stats.stubbedByPort[extraPort] = TunnelTrafficStats(uplinkBytes: 300, downlinkBytes: 400)
+        await coordinator.refreshTunnelStatistics(now: Date(timeIntervalSince1970: 100))
+
+        stats.stubbedByPort[primaryPort] = TunnelTrafficStats(uplinkBytes: 200, downlinkBytes: 300)
+        stats.errorsByPort[extraPort] = XrayStatsError.invalidResponse("boom")
+        await coordinator.refreshTunnelStatistics(now: Date(timeIntervalSince1970: 101))
+
+        #expect(coordinator.tunnelStatistics.count == 2)
+
+        let primary = try #require(coordinator.tunnelStatistics.first(where: { $0.id == Tunnel.primaryId }))
+        #expect(primary.isAvailable == true)
+        #expect(primary.uplinkBytes == 200)
+        #expect(primary.downlinkBytes == 300)
+
+        let failed = try #require(coordinator.tunnelStatistics.first(where: { $0.id == extraTunnel.id }))
+        #expect(failed.isAvailable == false)
+        #expect(failed.uplinkBytes == 300)
+        #expect(failed.downlinkBytes == 400)
+        #expect(failed.uploadRateBytesPerSecond == 0)
+        #expect(failed.downloadRateBytesPerSecond == 0)
     }
 }
 

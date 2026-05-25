@@ -308,4 +308,41 @@ struct ConfigGeneratorTests {
         let headers = ws?["headers"] as? [String: Any]
         #expect(headers?["Host"] as? String == "cdn.example.com")
     }
+
+    // MARK: - Statistics API
+
+    @Test("Stats API config is omitted by default")
+    func statsApiOmittedByDefault() {
+        let config = ConfigGenerator.generateXrayConfig(
+            server: makeServer(),
+            settings: makeSettings()
+        )
+
+        #expect(config["api"] == nil)
+        #expect(config["stats"] == nil)
+        #expect(config["policy"] == nil)
+    }
+
+    @Test("Stats API config is included when stats API port is provided")
+    func statsApiIncludedWhenPortProvided() {
+        let config = ConfigGenerator.generateXrayConfig(
+            server: makeServer(),
+            settings: makeSettings(),
+            statsAPIPort: 10085
+        )
+
+        let api = config["api"] as? [String: Any]
+        #expect(api?["tag"] as? String == "api")
+        #expect(api?["listen"] as? String == "127.0.0.1:10085")
+        let services = api?["services"] as? [String]
+        #expect(services?.contains("StatsService") == true)
+
+        let stats = config["stats"] as? [String: Any]
+        #expect(stats?.isEmpty == true)
+
+        let policy = config["policy"] as? [String: Any]
+        let system = policy?["system"] as? [String: Any]
+        #expect(system?["statsInboundUplink"] as? Bool == true)
+        #expect(system?["statsInboundDownlink"] as? Bool == true)
+    }
 }

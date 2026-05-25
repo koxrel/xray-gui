@@ -41,3 +41,8 @@ dist/
 
 # ── Project-specific ──────────────────────────
 Resources/xray-core
+
+# AI
+.serena
+.claude
+.omc

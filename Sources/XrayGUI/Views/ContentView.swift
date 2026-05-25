@@ -5,6 +5,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case servers = "Servers"
     case tunnels = "Tunnels"
+    case statistics = "Statistics"
     case subscriptions = "Subscriptions"
     case settings = "Settings"
     case logs = "Logs"
@@ -16,6 +17,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .dashboard: return "gauge.with.dots.needle.33percent"
         case .servers: return "server.rack"
         case .tunnels: return "point.3.connected.trianglepath.dotted"
+        case .statistics: return "chart.xyaxis.line"
         case .subscriptions: return "antenna.radiowaves.left.and.right"
         case .settings: return "gearshape"
         case .logs: return "doc.text"
@@ -43,6 +45,8 @@ struct ContentView: View {
                     ServersView()
                 case .tunnels:
                     TunnelsView()
+                case .statistics:
+                    StatisticsView()
                 case .subscriptions:
                     SubscriptionsView()
                 case .settings:
