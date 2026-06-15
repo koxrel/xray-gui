@@ -38,12 +38,12 @@ public final class ProxyCoordinator {
         store: any Storing,
         xrayManager: any XrayManaging,
         proxyManager: any ProxyManaging,
-        statsClient: any TunnelStatsQuerying = XrayStatsClient()
+        statsClient: (any TunnelStatsQuerying)? = nil
     ) {
         self.store = store
         self.xrayManager = xrayManager
         self.proxyManager = proxyManager
-        self.statsClient = statsClient
+        self.statsClient = statsClient ?? XrayStatsClient(binaryPath: xrayManager.getXrayBinaryPath())
     }
 
     public func setupLogCallback() {
@@ -600,7 +600,7 @@ public final class ProxyCoordinator {
             return aggregated
         }
 
-        tunnelStatistics = activeTunnels.map { tunnel in
+        let newSnapshots = activeTunnels.map { tunnel in
             let previous = previousById[tunnel.id]
             switch results[tunnel.id] {
             case let .success(traffic):
@@ -609,6 +609,30 @@ public final class ProxyCoordinator {
                 return makeUnavailableStatisticsSnapshot(for: tunnel, previous: previous)
             }
         }
+
+        // Skip the @Observable publish when no visible field changed — avoids
+        // gratuitous SwiftUI diffing of the entire Statistics grid on idle tunnels.
+        if hasVisibleDelta(previous: tunnelStatistics, next: newSnapshots) {
+            tunnelStatistics = newSnapshots
+        }
+    }
+
+    private func hasVisibleDelta(previous: [TunnelStatisticsSnapshot], next: [TunnelStatisticsSnapshot]) -> Bool {
+        guard previous.count == next.count else { return true }
+        for (lhs, rhs) in zip(previous, next) {
+            if lhs.id != rhs.id
+                || lhs.isAvailable != rhs.isAvailable
+                || lhs.uplinkBytes != rhs.uplinkBytes
+                || lhs.downlinkBytes != rhs.downlinkBytes
+                || lhs.uploadRateBytesPerSecond != rhs.uploadRateBytesPerSecond
+                || lhs.downloadRateBytesPerSecond != rhs.downloadRateBytesPerSecond
+                || lhs.serverName != rhs.serverName
+                || lhs.httpPort != rhs.httpPort
+                || lhs.socksPort != rhs.socksPort {
+                return true
+            }
+        }
+        return false
     }
 
     private func statsAPIPort(for tunnelId: String) -> Int {

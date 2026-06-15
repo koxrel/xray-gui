@@ -3,6 +3,9 @@ import XrayGUICore
 
 struct StatisticsView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.scenePhase) private var scenePhase
+
+    private static let tickReason = "StatisticsView.refresh"
 
     private static let byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
@@ -45,7 +48,25 @@ struct StatisticsView: View {
         }
         .navigationTitle("Statistics")
         .task(id: refreshKey) {
-            await refreshLoop()
+            // Single fetch when the view appears or the tunnel set changes.
+            // Continuous refresh is driven by appState.uiTick, not a sleep loop.
+            await appState.refreshTunnelStatistics()
+        }
+        .onChange(of: appState.uiTick) { _, _ in
+            guard activeTunnelCount > 0 else { return }
+            Task { await appState.refreshTunnelStatistics() }
+        }
+        .onChange(of: scenePhase, initial: true) { _, _ in syncTickInterest() }
+        .onChange(of: activeTunnelCount, initial: false) { _, _ in syncTickInterest() }
+        .onDisappear { appState.endUITicking(reason: Self.tickReason) }
+    }
+
+    private func syncTickInterest() {
+        let shouldTick = scenePhase == .active && activeTunnelCount > 0
+        if shouldTick {
+            appState.beginUITicking(reason: Self.tickReason)
+        } else {
+            appState.endUITicking(reason: Self.tickReason)
         }
     }
 
@@ -200,19 +221,10 @@ struct StatisticsView: View {
     }
 
     private func uptimeString(from startedAt: Date?) -> String {
+        // Reading appState.uiTick keeps the per-tunnel uptime label refreshing
+        // even when the snapshot republish is skipped because bytes are idle.
+        _ = appState.uiTick
         guard let startedAt else { return "Uptime --" }
         return Self.uptimeFormatter.string(from: startedAt, to: Date()) ?? "Uptime --"
-    }
-
-    private func refreshLoop() async {
-        await appState.refreshTunnelStatistics()
-        guard activeTunnelCount > 0 else { return }
-
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else { return }
-            await appState.refreshTunnelStatistics()
-            guard activeTunnelCount > 0 else { return }
-        }
     }
 }

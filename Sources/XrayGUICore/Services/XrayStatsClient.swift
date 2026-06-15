@@ -18,18 +18,14 @@ public enum XrayStatsError: LocalizedError {
 }
 
 public final class XrayStatsClient: TunnelStatsQuerying, @unchecked Sendable {
-    private let binaryPath: String?
+    private let binaryPath: String
 
-    public init(binaryPath: String? = nil) {
+    public init(binaryPath: String) {
         self.binaryPath = binaryPath
     }
 
     public func queryStats(apiPort: Int) async throws -> TunnelTrafficStats {
-        let binaryPath = if let binaryPath {
-            binaryPath
-        } else {
-            await MainActor.run { XrayManager().getXrayBinaryPath() }
-        }
+        let binaryPath = self.binaryPath
 
         guard FileManager.default.fileExists(atPath: binaryPath) else {
             throw XrayStatsError.binaryNotFound(binaryPath)

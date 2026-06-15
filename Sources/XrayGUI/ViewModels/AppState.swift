@@ -9,6 +9,66 @@ final class AppState {
     // MARK: - Coordinator
     let coordinator: ProxyCoordinator
 
+    // MARK: - Shared UI Ticker
+    //
+    // Single coalesced 1Hz clock that any visible view can subscribe to. Used by
+    // DashboardView (uptime display) and StatisticsView (stats refresh trigger).
+    // Refcounted by `reason` — when no view is interested, the timer is fully
+    // torn down so the process can idle. Suspended while the system is asleep.
+    private(set) var uiTick: Date = Date()
+    @ObservationIgnored private var uiTickInterests: Set<String> = []
+    @ObservationIgnored private var uiTickTimer: DispatchSourceTimer?
+    @ObservationIgnored private var systemAsleep = false
+
+    func beginUITicking(reason: String) {
+        guard !uiTickInterests.contains(reason) else { return }
+        uiTickInterests.insert(reason)
+        refreshUITickTimer()
+    }
+
+    func endUITicking(reason: String) {
+        guard uiTickInterests.contains(reason) else { return }
+        uiTickInterests.remove(reason)
+        refreshUITickTimer()
+    }
+
+    func handleSystemWillSleep() {
+        systemAsleep = true
+        refreshUITickTimer()
+    }
+
+    func handleSystemDidWake() {
+        systemAsleep = false
+        refreshUITickTimer()
+        // Force one immediate tick so any subscribed view re-renders on wake
+        // without waiting up to a full second for the next scheduled fire.
+        if !uiTickInterests.isEmpty {
+            uiTick = Date()
+        }
+    }
+
+    private func refreshUITickTimer() {
+        let shouldTick = !uiTickInterests.isEmpty && !systemAsleep
+        if shouldTick, uiTickTimer == nil {
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(
+                deadline: .now() + .seconds(1),
+                repeating: .seconds(1),
+                leeway: .milliseconds(200)
+            )
+            timer.setEventHandler { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.uiTick = Date()
+                }
+            }
+            timer.resume()
+            uiTickTimer = timer
+        } else if !shouldTick, let timer = uiTickTimer {
+            timer.cancel()
+            uiTickTimer = nil
+        }
+    }
+
     // MARK: - Forwarded State
     var servers: [ServerConfig] {
         get { coordinator.servers }

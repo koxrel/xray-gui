@@ -3,11 +3,27 @@ import XrayGUICore
 
 struct DashboardView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isConnecting = false
     @State private var connectionError: String?
-    @State private var uptime: String = ""
     @Namespace private var powerAnimation
-    private let uptimePublisher = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private static let tickReason = "DashboardView.uptime"
+
+    private var uptime: String {
+        // Reading appState.uiTick here establishes an Observation dependency,
+        // so this view rebuilds once per shared tick instead of needing its
+        // own Timer.publish.
+        _ = appState.uiTick
+        guard let startedAt = appState.proxyStatus.startedAt else { return "0s" }
+        let elapsed = Int(Date().timeIntervalSince(startedAt))
+        let hours = elapsed / 3600
+        let minutes = (elapsed % 3600) / 60
+        let seconds = elapsed % 60
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        if minutes > 0 { return "\(minutes)m \(seconds)s" }
+        return "\(seconds)s"
+    }
 
     var body: some View {
         ScrollView {
@@ -38,8 +54,9 @@ struct DashboardView: View {
             .padding(24)
         }
         .navigationTitle("Dashboard")
-        .onAppear { updateUptime() }
-        .onReceive(uptimePublisher) { _ in updateUptime() }
+        .onChange(of: scenePhase, initial: true) { _, _ in syncTickInterest() }
+        .onChange(of: appState.proxyStatus.running, initial: false) { _, _ in syncTickInterest() }
+        .onDisappear { appState.endUITicking(reason: Self.tickReason) }
         .alert("Connection Error", isPresented: Binding(
             get: { connectionError != nil },
             set: { if !$0 { connectionError = nil } }
@@ -273,22 +290,12 @@ struct DashboardView: View {
         }
     }
 
-    private func updateUptime() {
-        guard let startedAt = appState.proxyStatus.startedAt else {
-            uptime = "0s"
-            return
-        }
-        let elapsed = Int(Date().timeIntervalSince(startedAt))
-        let hours = elapsed / 3600
-        let minutes = (elapsed % 3600) / 60
-        let seconds = elapsed % 60
-
-        if hours > 0 {
-            uptime = "\(hours)h \(minutes)m"
-        } else if minutes > 0 {
-            uptime = "\(minutes)m \(seconds)s"
+    private func syncTickInterest() {
+        let shouldTick = scenePhase == .active && appState.proxyStatus.running
+        if shouldTick {
+            appState.beginUITicking(reason: Self.tickReason)
         } else {
-            uptime = "\(seconds)s"
+            appState.endUITicking(reason: Self.tickReason)
         }
     }
 }

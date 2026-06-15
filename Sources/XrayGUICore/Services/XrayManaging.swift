@@ -16,4 +16,6 @@ public protocol XrayManaging: AnyObject, Sendable {
     func terminateAllSync()
 
     func testLatency(server: ServerConfig) async -> Int
+
+    func getXrayBinaryPath() -> String
 }

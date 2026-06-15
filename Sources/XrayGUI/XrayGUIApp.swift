@@ -40,7 +40,11 @@ struct XrayGUIApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    var appState: AppState?
+    var appState: AppState? {
+        didSet { registerPowerObserversIfNeeded() }
+    }
+
+    private var powerObserversRegistered = false
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
@@ -59,6 +63,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let appState else { return }
         appState.xrayManager.terminateAllSync()
         appState.proxyManager.disableProxySync()
+    }
+
+    private func registerPowerObserversIfNeeded() {
+        guard !powerObserversRegistered, appState != nil else { return }
+        powerObserversRegistered = true
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(self, selector: #selector(systemWillSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        nc.addObserver(self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    @objc private func systemWillSleep() {
+        appState?.handleSystemWillSleep()
+    }
+
+    @objc private func systemDidWake() {
+        appState?.handleSystemDidWake()
     }
 }
 

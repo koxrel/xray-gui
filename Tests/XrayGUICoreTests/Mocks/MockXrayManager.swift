@@ -94,4 +94,8 @@ final class MockXrayManager: XrayManaging {
         testLatencyCalls.append(server)
         return stubbedLatency
     }
+
+    func getXrayBinaryPath() -> String {
+        "/mock/xray"
+    }
 }
