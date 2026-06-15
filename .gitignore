@@ -40,7 +40,7 @@ out/
 dist/
 
 # ── Project-specific ──────────────────────────
-Resources/xray-core
+# Resources/xray-core is tracked via Git LFS (see .gitattributes)
 
 # AI
 .serena
