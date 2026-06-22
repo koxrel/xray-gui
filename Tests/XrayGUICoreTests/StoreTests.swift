@@ -5,11 +5,21 @@ import Foundation
 @Suite("Store Tests")
 struct StoreTests {
 
+    /// Creates a Store rooted at a unique throwaway temp directory.
+    /// NEVER use the parameterless `Store()` in tests — it points at the
+    /// user's live `~/Library/Application Support/XrayGUI/` and its mutations
+    /// call `save()`, which would overwrite real data.
+    private func makeStore() -> Store {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xray-store-tests-\(UUID().uuidString)", isDirectory: true)
+        return Store(directory: dir)
+    }
+
     // MARK: - Server CRUD
 
     @Test("addServer appends and sets isActive to false")
     func addServer() {
-        let store = Store()
+        let store = makeStore()
         var data = StoreData()
         let server = ServerConfig(name: "Test", address: "test.com", uuid: "abc")
         let added = store.addServer(&data, server: server)
@@ -22,7 +32,7 @@ struct StoreTests {
 
     @Test("updateServer modifies existing server")
     func updateServer() {
-        let store = Store()
+        let store = makeStore()
         var data = StoreData()
         let server = store.addServer(&data, server: ServerConfig(name: "Original", address: "a.com", uuid: "1"))
 
@@ -36,7 +46,7 @@ struct StoreTests {
 
     @Test("deleteServer removes server and clears activeServerId if matching")
     func deleteServer() {
-        let store = Store()
+        let store = makeStore()
         var data = StoreData()
         let server = store.addServer(&data, server: ServerConfig(name: "ToDelete", address: "d.com", uuid: "1"))
         store.setActiveServer(&data, id: server.id)
@@ -50,7 +60,7 @@ struct StoreTests {
 
     @Test("setActiveServer marks correct server as active")
     func setActiveServer() {
-        let store = Store()
+        let store = makeStore()
         var data = StoreData()
         let s1 = store.addServer(&data, server: ServerConfig(name: "S1", address: "s1.com", uuid: "1"))
         let s2 = store.addServer(&data, server: ServerConfig(name: "S2", address: "s2.com", uuid: "2"))
@@ -72,7 +82,7 @@ struct StoreTests {
 
     @Test("setServerLatency updates latency for matching server")
     func setServerLatency() {
-        let store = Store()
+        let store = makeStore()
         var data = StoreData()
         let server = store.addServer(&data, server: ServerConfig(name: "S1", address: "s1.com", uuid: "1"))
 
@@ -84,7 +94,7 @@ struct StoreTests {
 
     @Test("addSubscription creates subscription with correct fields")
     func addSubscription() {
-        let store = Store()
+        let store = makeStore()
         var data = StoreData()
         let sub = store.addSubscription(&data, name: "My Sub", url: "https://example.com/sub")
 
@@ -97,7 +107,7 @@ struct StoreTests {
 
     @Test("deleteSubscription removes subscription and its servers")
     func deleteSubscription() {
-        let store = Store()
+        let store = makeStore()
         var data = StoreData()
         let sub = store.addSubscription(&data, name: "Sub", url: "https://example.com")
 
@@ -124,7 +134,7 @@ struct StoreTests {
 
     @Test("addServersForSubscription assigns subscriptionId and generates IDs")
     func addServersForSubscription() {
-        let store = Store()
+        let store = makeStore()
         var data = StoreData()
 
         let ids = store.addServersForSubscription(
@@ -146,7 +156,7 @@ struct StoreTests {
 
     @Test("removeServersForSubscription clears active server if affected")
     func removeServersForSubscription() {
-        let store = Store()
+        let store = makeStore()
         var data = StoreData()
 
         let ids = store.addServersForSubscription(
@@ -165,7 +175,7 @@ struct StoreTests {
 
     @Test("updateSettingsTyped applies mutation and returns updated settings")
     func updateSettings() {
-        let store = Store()
+        let store = makeStore()
         var data = StoreData()
 
         let updated = store.updateSettingsTyped(&data) { s in
@@ -182,7 +192,7 @@ struct StoreTests {
 
     @Test("configFileURL sanitizes tunnel ID to prevent path injection")
     func configFileUrlSanitization() {
-        let store = Store()
+        let store = makeStore()
 
         let safe = store.configFileURL(for: "my-tunnel-123")
         #expect(safe.lastPathComponent == "xray-config-my-tunnel-123.json")

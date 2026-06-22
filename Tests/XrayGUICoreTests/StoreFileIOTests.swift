@@ -2,56 +2,34 @@ import Testing
 import Foundation
 @testable import XrayGUICore
 
-/// Tests for Store persistence (file I/O) using a temporary directory,
-/// so tests don't touch ~/Library/Application Support/XrayGUI/.
+/// Tests for Store persistence (file I/O) using a per-test temporary directory.
 ///
-/// Strategy: Store uses a hardcoded path derived from FileManager's
-/// applicationSupportDirectory. Since we can't inject the path in the current
-/// design, these tests exercise the real file path and clean up after themselves.
-/// The tests are marked as mutually isolated so they don't step on each other.
+/// CRITICAL: these tests must NEVER use the live app-support path. `Store` now
+/// takes an injectable `directory:`, so each test runs against a throwaway temp
+/// dir. A previous version exercised the real `~/Library/Application Support/
+/// XrayGUI/` path with a backup/restore dance — a crash or kill mid-run left the
+/// user's data clobbered. Isolated temp dirs make that impossible.
 @Suite("Store File I/O Tests", .serialized)
 struct StoreFileIOTests {
 
-    /// The real path Store writes to.
-    private static let storeURL: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("XrayGUI", isDirectory: true)
-            .appendingPathComponent("xray-gui-data.json")
-    }()
+    /// Runs `body` against a Store rooted at a fresh temp directory, removed after.
+    private func withCleanStore(_ body: (Store, _ storeURL: URL) throws -> Void) throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xray-store-io-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
 
-    /// Backup any existing store file before each test and restore after.
-    private func withCleanStore(_ body: (Store) throws -> Void) throws {
-        let url = Self.storeURL
-        let backupURL = url.deletingPathExtension().appendingPathExtension("test-backup.json")
-
-        // Back up existing file, replacing any stale backup from a previous run
-        if FileManager.default.fileExists(atPath: url.path) {
-            if FileManager.default.fileExists(atPath: backupURL.path) {
-                try FileManager.default.removeItem(at: backupURL)
-            }
-            try FileManager.default.copyItem(at: url, to: backupURL)
-        }
-
-        defer {
-            // Restore original file or remove the test-written one
-            try? FileManager.default.removeItem(at: url)
-            if FileManager.default.fileExists(atPath: backupURL.path) {
-                try? FileManager.default.moveItem(at: backupURL, to: url)
-            }
-        }
-
-        let store = Store()
-        try body(store)
+        let store = Store(directory: dir)
+        let storeURL = dir.appendingPathComponent("xray-gui-data.json")
+        try body(store, storeURL)
     }
 
     // MARK: - Load
 
     @Test("load() returns default StoreData when file does not exist")
     func loadReturnsDefaultWhenMissing() throws {
-        try withCleanStore { store in
+        try withCleanStore { store, storeURL in
             // Ensure no file exists
-            try? FileManager.default.removeItem(at: Self.storeURL)
+            try? FileManager.default.removeItem(at: storeURL)
 
             let data = store.load()
             #expect(data.servers.isEmpty)
@@ -63,12 +41,12 @@ struct StoreFileIOTests {
 
     @Test("load() merges zero-value httpPort with default 1087")
     func loadMergesZeroHttpPort() throws {
-        try withCleanStore { store in
+        try withCleanStore { store, storeURL in
             // Write JSON with httpPort=0
             let json = """
             {"settings": {"httpPort": 0, "socksPort": 0, "dnsServers": []}}
             """
-            try json.write(to: Self.storeURL, atomically: true, encoding: .utf8)
+            try json.write(to: storeURL, atomically: true, encoding: .utf8)
 
             let data = store.load()
             #expect(data.settings.httpPort == 1087)
@@ -78,11 +56,11 @@ struct StoreFileIOTests {
 
     @Test("load() merges empty dnsServers with defaults")
     func loadMergesEmptyDnsServers() throws {
-        try withCleanStore { store in
+        try withCleanStore { store, storeURL in
             let json = """
             {"settings": {"httpPort": 1087, "socksPort": 1080, "dnsServers": []}}
             """
-            try json.write(to: Self.storeURL, atomically: true, encoding: .utf8)
+            try json.write(to: storeURL, atomically: true, encoding: .utf8)
 
             let data = store.load()
             #expect(!data.settings.dnsServers.isEmpty)
@@ -91,11 +69,11 @@ struct StoreFileIOTests {
 
     @Test("load() merges empty bypassDomains with defaults")
     func loadMergesEmptyBypassDomains() throws {
-        try withCleanStore { store in
+        try withCleanStore { store, storeURL in
             let json = """
             {"settings": {"httpPort": 1087, "socksPort": 1080, "dnsServers": ["1.1.1.1"], "bypassDomains": []}}
             """
-            try json.write(to: Self.storeURL, atomically: true, encoding: .utf8)
+            try json.write(to: storeURL, atomically: true, encoding: .utf8)
 
             let data = store.load()
             #expect(!data.settings.bypassDomains.isEmpty)
@@ -104,9 +82,9 @@ struct StoreFileIOTests {
 
     @Test("load() returns default and backs up corrupted file")
     func loadHandlesCorruptedFile() throws {
-        try withCleanStore { store in
+        try withCleanStore { store, storeURL in
             let corruptJson = "{ this is NOT valid JSON at all {{{"
-            try corruptJson.write(to: Self.storeURL, atomically: true, encoding: .utf8)
+            try corruptJson.write(to: storeURL, atomically: true, encoding: .utf8)
 
             let data = store.load()
 
@@ -115,13 +93,12 @@ struct StoreFileIOTests {
             #expect(data.settings.httpPort == 1087)
 
             // Backup file should have been created
-            let backupURL = Self.storeURL.deletingPathExtension().appendingPathExtension("corrupted.json")
+            let backupURL = storeURL.deletingPathExtension().appendingPathExtension("corrupted.json")
             let backupExists = FileManager.default.fileExists(atPath: backupURL.path)
-            defer { try? FileManager.default.removeItem(at: backupURL) }
             #expect(backupExists == true)
 
             // Original file should no longer exist (moved to backup)
-            #expect(!FileManager.default.fileExists(atPath: Self.storeURL.path))
+            #expect(!FileManager.default.fileExists(atPath: storeURL.path))
         }
     }
 
@@ -129,7 +106,7 @@ struct StoreFileIOTests {
 
     @Test("save then load returns same data")
     func saveLoadRoundTrip() throws {
-        try withCleanStore { store in
+        try withCleanStore { store, _ in
             var data = StoreData()
             let server = store.addServer(&data, server: ServerConfig(name: "RoundTrip", address: "rt.com", uuid: "rt-uuid"))
             _ = store.addSubscription(&data, name: "MySub", url: "https://sub.example.com")
@@ -147,14 +124,14 @@ struct StoreFileIOTests {
 
     @Test("save() writes valid JSON to disk")
     func saveWritesValidJson() throws {
-        try withCleanStore { store in
+        try withCleanStore { store, storeURL in
             var data = StoreData()
             _ = store.addServer(&data, server: ServerConfig(name: "JSON", address: "json.com", uuid: "j"))
             // addServer calls save internally
 
-            #expect(FileManager.default.fileExists(atPath: Self.storeURL.path))
+            #expect(FileManager.default.fileExists(atPath: storeURL.path))
 
-            let rawData = try Data(contentsOf: Self.storeURL)
+            let rawData = try Data(contentsOf: storeURL)
             let parsed = try JSONSerialization.jsonObject(with: rawData) as? [String: Any]
             #expect(parsed?["servers"] != nil)
             #expect(parsed?["settings"] != nil)
@@ -163,7 +140,7 @@ struct StoreFileIOTests {
 
     @Test("save() overwrites existing file atomically")
     func saveOverwrites() throws {
-        try withCleanStore { store in
+        try withCleanStore { store, _ in
             var data = StoreData()
             _ = store.addServer(&data, server: ServerConfig(name: "First", address: "first.com", uuid: "f"))
             // Second save overwrites

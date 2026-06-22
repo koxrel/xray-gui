@@ -1,13 +1,24 @@
 import Foundation
 
 public final class Store: Storing, Sendable {
+    private let directory: URL
     private let fileURL: URL
 
-    public init() {
+    /// Default application-support directory the app persists into.
+    /// Computed once so production and tests agree on the canonical location.
+    public static var defaultDirectory: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = appSupport.appendingPathComponent("XrayGUI", isDirectory: true)
-        try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
-        self.fileURL = appDir.appendingPathComponent("xray-gui-data.json")
+        return appSupport.appendingPathComponent("XrayGUI", isDirectory: true)
+    }
+
+    /// - Parameter directory: Base directory for the data file and per-tunnel
+    ///   config files. Defaults to `~/Library/Application Support/XrayGUI`.
+    ///   Tests MUST pass a temporary directory — otherwise they overwrite the
+    ///   user's live `xray-gui-data.json` (this once silently wiped real data).
+    public init(directory: URL = Store.defaultDirectory) {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        self.directory = directory
+        self.fileURL = directory.appendingPathComponent("xray-gui-data.json")
         print("[Store] Using store file: \(fileURL.path)")
     }
 
@@ -163,9 +174,7 @@ public final class Store: Storing, Sendable {
         // Sanitize tunnelId to prevent path injection — allow only alphanumeric and hyphens
         let sanitized = tunnelId.filter { $0.isLetter || $0.isNumber || $0 == "-" }
         let safeName = sanitized.isEmpty ? "unknown" : sanitized
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = appSupport.appendingPathComponent("XrayGUI", isDirectory: true)
-        return appDir.appendingPathComponent("xray-config-\(safeName).json")
+        return directory.appendingPathComponent("xray-config-\(safeName).json")
     }
 
     public func removeConfigFile(for tunnelId: String) {
