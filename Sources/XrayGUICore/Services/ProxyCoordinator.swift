@@ -580,33 +580,35 @@ public final class ProxyCoordinator {
         let previousById = Dictionary(uniqueKeysWithValues: tunnelStatistics.map { ($0.id, $0) })
         let apiPorts = Dictionary(uniqueKeysWithValues: activeTunnels.map { ($0.id, statsAPIPort(for: $0.id)) })
 
-        let results = await withTaskGroup(of: (String, Result<TunnelTrafficStats, Error>).self, returning: [String: Result<TunnelTrafficStats, Error>].self) { group in
-            for tunnel in activeTunnels {
-                guard let apiPort = apiPorts[tunnel.id] else { continue }
-                let statsClient = self.statsClient
-                group.addTask {
-                    do {
-                        return (tunnel.id, .success(try await statsClient.queryStats(apiPort: apiPort)))
-                    } catch {
-                        return (tunnel.id, .failure(error))
-                    }
-                }
-            }
-
-            var aggregated: [String: Result<TunnelTrafficStats, Error>] = [:]
-            for await (tunnelId, result) in group {
-                aggregated[tunnelId] = result
-            }
-            return aggregated
-        }
-
-        let newSnapshots = activeTunnels.map { tunnel in
+        // Query each tunnel with a direct `await` rather than a `withTaskGroup`
+        // fan-out. The query bridges a `Process` exit through a continuation that
+        // resumes from Foundation's terminationHandler queue (an external thread);
+        // when that child task lives inside a task group, the group's result
+        // collection deterministically dropped the child's value in optimized
+        // builds — every query succeeded (real bytes returned) yet the group
+        // yielded nothing, surfacing as a permanent "Stats unavailable". Awaiting
+        // directly resumes THIS task with the value, with no group offer/collect
+        // step to lose it. Tunnels are few and refresh is 1 Hz, so the sequential
+        // latency (~tens of ms per tunnel) is irrelevant.
+        var newSnapshots: [TunnelStatisticsSnapshot] = []
+        newSnapshots.reserveCapacity(activeTunnels.count)
+        for tunnel in activeTunnels {
             let previous = previousById[tunnel.id]
-            switch results[tunnel.id] {
-            case let .success(traffic):
-                return makeStatisticsSnapshot(for: tunnel, traffic: traffic, previous: previous, now: now)
-            case .failure, .none:
-                return makeUnavailableStatisticsSnapshot(for: tunnel, previous: previous)
+            guard let apiPort = apiPorts[tunnel.id] else {
+                newSnapshots.append(makeUnavailableStatisticsSnapshot(for: tunnel, previous: previous))
+                continue
+            }
+            do {
+                let traffic = try await statsClient.queryStats(apiPort: apiPort)
+                newSnapshots.append(makeStatisticsSnapshot(for: tunnel, traffic: traffic, previous: previous, now: now))
+            } catch {
+                // Log the real reason once per failure episode (when a tunnel
+                // transitions into the unavailable state) so a persistent stats
+                // outage is diagnosable instead of a silent "Stats unavailable".
+                if previous?.isAvailable != false {
+                    appendLog("[Stats] Query failed for '\(tunnel.serverName)' on API port \(apiPort): \(error.localizedDescription)")
+                }
+                newSnapshots.append(makeUnavailableStatisticsSnapshot(for: tunnel, previous: previous))
             }
         }
 

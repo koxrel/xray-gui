@@ -61,4 +61,45 @@ struct XrayStatsClientTests {
             try XrayStatsClient.parseStatsQueryResponse("not-json")
         }
     }
+
+    /// Regression: Xray serializes stats as protobuf JSON, which OMITS the
+    /// `value` field entirely for zero-valued counters. A single idle counter
+    /// (no `value` key) must be treated as 0, not fail the whole response —
+    /// otherwise every tunnel reads as "Stats unavailable". This is the exact
+    /// shape captured from a live `xray api statsquery` with idle inbounds.
+    @Test("parseStatsQueryResponse treats omitted value field as zero")
+    func parseOmittedValueFieldAsZero() throws {
+        let json = """
+        {
+          "stat": [
+            { "name": "inbound>>>http-in>>>traffic>>>uplink", "value": 277 },
+            { "name": "inbound>>>http-in>>>traffic>>>downlink" },
+            { "name": "inbound>>>socks-in>>>traffic>>>uplink" },
+            { "name": "inbound>>>socks-in>>>traffic>>>downlink" }
+          ]
+        }
+        """
+
+        let stats = try XrayStatsClient.parseStatsQueryResponse(json)
+
+        #expect(stats.uplinkBytes == 277)
+        #expect(stats.downlinkBytes == 0)
+    }
+
+    @Test("parseStatsQueryResponse accepts numeric (non-string) values")
+    func parseNumericValues() throws {
+        let json = """
+        {
+          "stat": [
+            { "name": "inbound>>>http-in>>>traffic>>>uplink", "value": 1000 },
+            { "name": "inbound>>>socks-in>>>traffic>>>downlink", "value": 2000 }
+          ]
+        }
+        """
+
+        let stats = try XrayStatsClient.parseStatsQueryResponse(json)
+
+        #expect(stats.uplinkBytes == 1000)
+        #expect(stats.downlinkBytes == 2000)
+    }
 }

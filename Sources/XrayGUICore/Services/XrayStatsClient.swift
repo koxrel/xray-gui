@@ -17,6 +17,19 @@ public enum XrayStatsError: LocalizedError {
     }
 }
 
+/// One-shot, thread-safe latch: the first `claim()` returns true, all others false.
+/// Used to ensure a continuation is resumed exactly once across racing callbacks.
+private final class ResumeGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
+    }
+}
+
 public final class XrayStatsClient: TunnelStatsQuerying, @unchecked Sendable {
     private let binaryPath: String
 
@@ -25,13 +38,30 @@ public final class XrayStatsClient: TunnelStatsQuerying, @unchecked Sendable {
     }
 
     public func queryStats(apiPort: Int) async throws -> TunnelTrafficStats {
-        let binaryPath = self.binaryPath
-
         guard FileManager.default.fileExists(atPath: binaryPath) else {
             throw XrayStatsError.binaryNotFound(binaryPath)
         }
 
-        return try await Task.detached(priority: .utility) { [binaryPath] in
+        let stdout = try await runStatsQuery(apiPort: apiPort)
+        return try Self.parseStatsQueryResponse(stdout)
+    }
+
+    /// Launches the `xray api statsquery` child process and resumes when it exits.
+    ///
+    /// Critically, this does NOT call `process.waitUntilExit()`. That call blocks
+    /// the calling thread, and Swift concurrency runs `async` work (including
+    /// `Task.detached`) on a fixed-size cooperative thread pool — one thread per
+    /// core. Blocking those threads on synchronous process waits starves the pool;
+    /// under enough concurrent stats queries the runtime can no longer drain the
+    /// enclosing `withTaskGroup`, and an in-flight child task offering its result
+    /// to a torn-down group segfaults (`TaskGroup::offer`, EXC_BAD_ACCESS).
+    ///
+    /// Instead we bridge completion via `terminationHandler`, which Foundation
+    /// invokes on its own internal queue — never the cooperative pool — so no
+    /// concurrency thread is ever blocked on this process.
+    private func runStatsQuery(apiPort: Int) async throws -> String {
+        let binaryPath = self.binaryPath
+        return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: binaryPath)
             process.arguments = [
@@ -48,20 +78,53 @@ public final class XrayStatsClient: TunnelStatsQuerying, @unchecked Sendable {
             process.standardError = stderrPipe
             process.standardInput = FileHandle.nullDevice
 
-            try process.run()
-            process.waitUntilExit()
-
-            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            let stdout = String(data: stdoutData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-            guard process.terminationStatus == 0 else {
-                throw XrayStatsError.commandFailed(stderr.isEmpty ? stdout : stderr)
+            // Guarantees the continuation is resumed exactly once, no matter which
+            // path (normal exit, run() failure, or watchdog kill) gets there first.
+            let resumeGuard = ResumeGuard()
+            let finish: @Sendable (Result<String, Error>) -> Void = { result in
+                guard resumeGuard.claim() else { return }
+                continuation.resume(with: result)
             }
 
-            return try Self.parseStatsQueryResponse(stdout)
-        }.value
+            process.terminationHandler = { proc in
+                // The process has already exited, so the (small) stats payload is
+                // fully buffered — reading to end here cannot deadlock.
+                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                let stdout = String(data: stdoutData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                if proc.terminationStatus == 0 {
+                    finish(.success(stdout))
+                } else {
+                    finish(.failure(XrayStatsError.commandFailed(stderr.isEmpty ? stdout : stderr)))
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                finish(.failure(XrayStatsError.commandFailed(error.localizedDescription)))
+                return
+            }
+
+            // Watchdog: a stats query must never hang. Crucially this resumes the
+            // continuation DIRECTLY rather than relying on terminationHandler.
+            //
+            // `Process.terminationHandler` is not guaranteed to fire in every edge
+            // case (notably a process that exits in the narrow window around launch,
+            // which happens right after a tunnel restart when the gRPC API isn't
+            // listening yet and `xray` exits almost immediately). If the handler is
+            // missed, the continuation would be orphaned forever — and because the
+            // caller coalesces refreshes behind `isRefreshingStatistics`, that one
+            // orphaned query freezes the ENTIRE stats feature on its last snapshot.
+            // Resuming here (ResumeGuard makes it a no-op if the handler already ran)
+            // bounds every query to `timeout` seconds no matter what Foundation does.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) { [weak process] in
+                finish(.failure(XrayStatsError.commandFailed("stats query timed out")))
+                process?.terminate() // best-effort cleanup; no-op if already exited
+            }
+        }
     }
 
     static func parseStatsQueryResponse(_ response: String) throws -> TunnelTrafficStats {
@@ -118,13 +181,18 @@ private struct StatsQueryEntry: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
 
-        if let stringValue = try? container.decode(String.self, forKey: .value),
-           let parsed = UInt64(stringValue) {
-            value = parsed
-        } else if let intValue = try? container.decode(UInt64.self, forKey: .value) {
+        // Xray serializes stats as protobuf JSON, which OMITS the `value` field
+        // entirely for zero-valued counters (e.g. an idle inbound). A missing value
+        // therefore means 0 — it must not fail the decode, or a single idle counter
+        // would poison the whole response and make all stats read as unavailable.
+        // Accept numeric or string-encoded values; treat absent/null/unparseable as 0.
+        if let intValue = try? container.decodeIfPresent(UInt64.self, forKey: .value) {
             value = intValue
+        } else if let stringValue = try? container.decodeIfPresent(String.self, forKey: .value),
+                  let parsed = UInt64(stringValue) {
+            value = parsed
         } else {
-            throw DecodingError.dataCorruptedError(forKey: .value, in: container, debugDescription: "Unsupported stat value")
+            value = 0
         }
     }
 }
