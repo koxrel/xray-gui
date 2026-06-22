@@ -9,6 +9,16 @@ BUILD_DIR=".build/release"
 INSTALL_DIR="/Applications"
 APP_BUNDLE_ID="com.xraygui.app"
 
+# Build identity stamped into CFBundleVersion so the running app can report
+# exactly which commit it was built from (surfaced in the app's Logs as
+# "[Build] XrayGUI <version>"). The "-dirty" suffix flags an uncommitted tree.
+GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    GIT_SHA="${GIT_SHA}-dirty"
+fi
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BUILD_VERSION="${GIT_SHA} (${BUILD_TIME})"
+
 wait_for_process_exit() {
     local process_name="$1"
     local timeout_seconds="${2:-10}"
@@ -62,7 +72,7 @@ create_app_bundle() {
         echo "WARNING: AppIcon.icns not found — run: swift tools/generate-app-icon.swift"
     fi
 
-    cat > "$destination/Contents/Info.plist" <<'PLIST'
+    cat > "$destination/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -76,8 +86,10 @@ create_app_bundle() {
     <string>Xray GUI</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${GIT_SHA}</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>${BUILD_VERSION}</string>
     <key>LSUIElement</key>
     <true/>
 </dict>
@@ -93,7 +105,7 @@ sync_app_bundle() {
     rsync -a --delete "$source/" "$destination/"
 }
 
-echo "Building $APP_NAME in release mode..."
+echo "Building $APP_NAME ($BUILD_VERSION) in release mode..."
 swift build -c release
 
 echo "Build complete: $BUILD_DIR/$APP_NAME"
@@ -120,7 +132,18 @@ case "${1:-run}" in
 
         trap - EXIT
         cleanup_temp_dir
+
+        # Verify the bundle we just wrote actually carries this build's version —
+        # catches a stale/partial install before we waste time wondering why a fix
+        # "didn't take".
+        installed_version="$(defaults read "$INSTALL_DIR/$APP_NAME.app/Contents/Info" CFBundleVersion 2>/dev/null || echo "?")"
+        if [ "$installed_version" != "$BUILD_VERSION" ]; then
+            echo "ERROR: stale install — expected '$BUILD_VERSION' but bundle reports '$installed_version'." >&2
+            exit 1
+        fi
+
         echo "Installed to $INSTALL_DIR/$APP_NAME.app"
+        echo "Verified build: $installed_version"
         echo "Opening..."
         open "$INSTALL_DIR/$APP_NAME.app"
         ;;

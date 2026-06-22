@@ -133,6 +133,11 @@ final class AppState {
         let proxyManager = DefaultProxyManager()
         let coordinator = ProxyCoordinator(store: store, xrayManager: xrayManager, proxyManager: proxyManager)
         self.init(coordinator: coordinator)
+        // Stamp the running build into the logs so "is my fix actually running?"
+        // is answerable at a glance. CFBundleVersion is set to the git SHA (+
+        // "-dirty") by build.sh; falls back to "dev" for `swift run`.
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "dev"
+        coordinator.appendLog("[Build] XrayGUI \(build)")
     }
 
     // MARK: - Data Loading
