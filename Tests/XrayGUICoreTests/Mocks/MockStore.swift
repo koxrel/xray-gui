@@ -149,6 +149,47 @@ final class MockStore: Storing, @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    func reconcileServersForSubscription(_ data: inout StoreData, subscriptionId: String, servers parsedServers: [ServerConfig]) -> [String] {
+        var existingByKey: [String: [ServerConfig]] = [:]
+        for server in data.servers where server.subscriptionId == subscriptionId {
+            existingByKey[server.identityKey, default: []].append(server)
+        }
+
+        var reconciled: [ServerConfig] = []
+        var reconciledIds: [String] = []
+
+        for var parsed in parsedServers {
+            parsed.subscriptionId = subscriptionId
+            let key = parsed.identityKey
+            if var matches = existingByKey[key], let existing = matches.first {
+                matches.removeFirst()
+                existingByKey[key] = matches
+                parsed.id = existing.id
+                parsed.isActive = existing.isActive
+                parsed.latency = existing.latency
+            } else {
+                parsed.id = UUID().uuidString
+                parsed.isActive = false
+                parsed.latency = nil
+            }
+            reconciled.append(parsed)
+            reconciledIds.append(parsed.id)
+        }
+
+        let survivingIds = Set(reconciledIds)
+        if let activeId = data.settings.activeServerId,
+           data.servers.contains(where: { $0.id == activeId && $0.subscriptionId == subscriptionId }),
+           !survivingIds.contains(activeId) {
+            data.settings.activeServerId = nil
+        }
+
+        data.servers.removeAll { $0.subscriptionId == subscriptionId }
+        data.servers.append(contentsOf: reconciled)
+        save(data)
+        return reconciledIds
+    }
+
     // MARK: - Settings
 
     @discardableResult

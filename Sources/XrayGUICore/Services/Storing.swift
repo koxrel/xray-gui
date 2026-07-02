@@ -17,6 +17,11 @@ public protocol Storing: Sendable {
     func deleteSubscription(_ data: inout StoreData, id: String)
     func addServersForSubscription(_ data: inout StoreData, subscriptionId: String, servers: [ServerConfig]) -> [String]
     func removeServersForSubscription(_ data: inout StoreData, subscriptionId: String)
+    /// Reconciles a subscription's servers against freshly parsed content while preserving
+    /// the `id`, `isActive`, and `latency` of servers that still exist (matched by
+    /// `ServerConfig.identityKey`). Returns the ids of the subscription's servers after reconciliation.
+    @discardableResult
+    func reconcileServersForSubscription(_ data: inout StoreData, subscriptionId: String, servers: [ServerConfig]) -> [String]
 
     @discardableResult func updateSettingsTyped(_ data: inout StoreData, _ update: (inout AppSettings) -> Void) -> AppSettings
 }

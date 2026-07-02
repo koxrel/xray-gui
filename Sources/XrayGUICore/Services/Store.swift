@@ -160,6 +160,53 @@ public final class Store: Storing, Sendable {
         }
     }
 
+    @discardableResult
+    public func reconcileServersForSubscription(_ data: inout StoreData, subscriptionId: String, servers parsedServers: [ServerConfig]) -> [String] {
+        // Index this subscription's existing servers by their stable identity key.
+        // Use arrays so duplicate keys (identical endpoints) are matched one-to-one.
+        var existingByKey: [String: [ServerConfig]] = [:]
+        for server in data.servers where server.subscriptionId == subscriptionId {
+            existingByKey[server.identityKey, default: []].append(server)
+        }
+
+        var reconciled: [ServerConfig] = []
+        var reconciledIds: [String] = []
+
+        for var parsed in parsedServers {
+            parsed.subscriptionId = subscriptionId
+            let key = parsed.identityKey
+            if var matches = existingByKey[key], let existing = matches.first {
+                // Same endpoint still present: keep its stable id/flags, refresh mutable fields
+                // (name + connection params already live on `parsed`).
+                matches.removeFirst()
+                existingByKey[key] = matches
+                parsed.id = existing.id
+                parsed.isActive = existing.isActive
+                parsed.latency = existing.latency
+            } else {
+                parsed.id = UUID().uuidString
+                parsed.isActive = false
+                parsed.latency = nil
+            }
+            reconciled.append(parsed)
+            reconciledIds.append(parsed.id)
+        }
+
+        // Clear the active server only if it belonged to this subscription and genuinely vanished.
+        let survivingIds = Set(reconciledIds)
+        if let activeId = data.settings.activeServerId,
+           data.servers.contains(where: { $0.id == activeId && $0.subscriptionId == subscriptionId }),
+           !survivingIds.contains(activeId) {
+            data.settings.activeServerId = nil
+        }
+
+        // Replace this subscription's server set; leave other subscriptions' servers untouched.
+        data.servers.removeAll { $0.subscriptionId == subscriptionId }
+        data.servers.append(contentsOf: reconciled)
+        save(data)
+        return reconciledIds
+    }
+
     // MARK: - Settings
 
     public func updateSettingsTyped(_ data: inout StoreData, _ update: (inout AppSettings) -> Void) -> AppSettings {

@@ -3,10 +3,14 @@ import Observation
 
 public enum ProxyError: LocalizedError {
     case noActiveServer
+    case serverNotFound(tunnelName: String)
 
     public var errorDescription: String? {
         switch self {
-        case .noActiveServer: return "No active server selected"
+        case .noActiveServer:
+            return "No active server selected"
+        case .serverNotFound(let tunnelName):
+            return "The server for tunnel \"\(tunnelName)\" no longer exists. Re-select a server for this tunnel."
         }
     }
 }
@@ -70,9 +74,42 @@ public final class ProxyCoordinator {
             tunnels[i].startedAt = nil
         }
 
+        // Repair tunnels whose serverId was orphaned by a past subscription update.
+        healOrphanedTunnels()
+
         tunnelStatistics.removeAll()
         tunnelStatsAPIPorts.removeAll()
         proxyStatus = makeProxyStatus(running: false)
+    }
+
+    /// Best-effort recovery for tunnels whose `serverId` no longer resolves to a server
+    /// (e.g. a pre-fix subscription update that regenerated server ids). Re-links each
+    /// orphaned tunnel to a current server matching its cached `serverName`, persisting the
+    /// repair. Tunnels with no name match are left untouched and surface a clear error on start.
+    @discardableResult
+    func healOrphanedTunnels() -> Int {
+        var healed = 0
+        for i in tunnels.indices {
+            let tunnel = tunnels[i]
+            guard !servers.contains(where: { $0.id == tunnel.serverId }) else { continue }
+            // Prefer an exact name match; ties are broken by first occurrence.
+            guard let replacement = servers.first(where: { $0.name == tunnel.serverName }) else { continue }
+            tunnels[i] = Tunnel(
+                id: tunnel.id,
+                serverId: replacement.id,
+                serverName: replacement.name,
+                httpPort: tunnel.httpPort,
+                socksPort: tunnel.socksPort,
+                running: tunnel.running,
+                startedAt: tunnel.startedAt
+            )
+            healed += 1
+        }
+        if healed > 0 {
+            appendLog("[Tunnel] Re-linked \(healed) orphaned tunnel(s) to current servers by name")
+            saveTunnels()
+        }
+        return healed
     }
 
     public var storeData: StoreData {
@@ -186,14 +223,17 @@ public final class ProxyCoordinator {
         let content = try await SubscriptionManager.fetchSubscription(url: sub.url)
         let parsedServers = SubscriptionManager.parseSubscriptionContent(content)
         withStoreData { data in
-            self.store.removeServersForSubscription(&data, subscriptionId: sub.id)
-            let newIds = self.store.addServersForSubscription(&data, subscriptionId: sub.id, servers: parsedServers)
+            // Reconcile by stable identity key so existing server ids (and the tunnels /
+            // activeServerId that reference them) survive the refresh. See ServerConfig.identityKey.
+            let newIds = self.store.reconcileServersForSubscription(&data, subscriptionId: sub.id, servers: parsedServers)
             if var updatedSub = data.subscriptions.first(where: { $0.id == sub.id }) {
                 updatedSub.serverIds = newIds
                 updatedSub.lastUpdated = ISO8601DateFormatter().string(from: Date())
                 self.store.updateSubscription(&data, subscription: updatedSub)
             }
         }
+        // Repair any tunnels whose server reference drifted in a past (pre-fix) update.
+        healOrphanedTunnels()
     }
 
     public func updateSubscription(_ id: String) async {
@@ -426,7 +466,7 @@ public final class ProxyCoordinator {
         // If running, restart with new ports
         if tunnel.running {
             guard let server = servers.first(where: { $0.id == tunnel.serverId }) else {
-                throw ProxyError.noActiveServer
+                throw ProxyError.serverNotFound(tunnelName: tunnel.serverName)
             }
             try await xrayManager.stop(tunnelId: tunnelId)
             let configURL = store.configFileURL(for: tunnelId)
@@ -471,10 +511,15 @@ public final class ProxyCoordinator {
     }
 
     public func resumeTunnel(_ tunnelId: String) async throws {
-        guard let idx = tunnels.firstIndex(where: { $0.id == tunnelId }) else { return }
+        guard var idx = tunnels.firstIndex(where: { $0.id == tunnelId }) else { return }
+        if !servers.contains(where: { $0.id == tunnels[idx].serverId }) {
+            healOrphanedTunnels()
+            guard let refreshed = tunnels.firstIndex(where: { $0.id == tunnelId }) else { return }
+            idx = refreshed
+        }
         let tunnel = tunnels[idx]
         guard let server = servers.first(where: { $0.id == tunnel.serverId }) else {
-            throw ProxyError.noActiveServer
+            throw ProxyError.serverNotFound(tunnelName: tunnel.serverName)
         }
 
         let configURL = store.configFileURL(for: tunnelId)

@@ -75,6 +75,30 @@ public struct ServerConfig: Codable, Identifiable, Equatable, Sendable {
         self.isActive = isActive
     }
 
+    /// Stable natural key derived from the connection-defining fields.
+    ///
+    /// Used to match a server across subscription updates so its `id` (and the
+    /// `Tunnel.serverId` / `activeServerId` references that point at it) survive a
+    /// refresh. Deliberately excludes mutable/identity fields — `name`, `latency`,
+    /// `isActive`, `id`, and `subscriptionId` — so a renamed or re-tested server is
+    /// still recognised as the same endpoint.
+    public var identityKey: String {
+        [
+            address.lowercased(),
+            String(port),
+            uuid,
+            network,
+            security,
+            publicKey,
+            shortId,
+            sni,
+            wsPath ?? "",
+            wsHost ?? "",
+            grpcServiceName ?? "",
+            headerType ?? ""
+        ].joined(separator: "|")
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
