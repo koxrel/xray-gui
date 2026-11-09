@@ -23,7 +23,10 @@ public enum SubscriptionManager {
             }
         }
 
-        var request = URLRequest(url: requestURL)
+        // Always hit the network: subscription servers often omit Cache-Control, and
+        // URLSession's heuristic freshness (based on Last-Modified) would otherwise
+        // keep serving a stale cached server list for days.
+        var request = URLRequest(url: requestURL, cachePolicy: .reloadIgnoringLocalCacheData)
         request.timeoutInterval = 15
 
         let (data, _) = try await URLSession.shared.data(for: request)
